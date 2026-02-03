@@ -1,0 +1,574 @@
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, forwardRef } from '@nestjs/common';
+import * as fs from 'fs';
+import * as path from 'path';
+import { TelegramService } from '../telegram/telegram.service';
+import { AgentService } from '../agent/agent.service';
+
+export interface ScheduledJob {
+  id: string;
+  chatId: string;
+  description: string;
+  taskContext: string;
+  scheduleType: 'once' | 'recurring';
+
+  // For one-time tasks
+  executeAt?: string; // ISO date string
+
+  // For recurring tasks
+  cronExpression?: string; // Cron expression (e.g., "0 9 * * MON")
+
+  // Execution limits
+  maxExecutions?: number; // null/undefined = unlimited, 1 = one-time
+  executionCount: number;
+
+  // Metadata
+  createdAt: string;
+  lastExecutedAt?: string;
+  status: 'active' | 'completed' | 'cancelled';
+}
+
+interface CronJobsData {
+  jobs: ScheduledJob[];
+}
+
+@Injectable()
+export class SchedulerService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(SchedulerService.name);
+  private readonly dataDir: string;
+  private jobs: ScheduledJob[] = [];
+  private checkInterval: NodeJS.Timeout | null = null;
+  private cleanupInterval: NodeJS.Timeout | null = null;
+  private readonly CHECK_INTERVAL_MS = 60000; // Check every minute
+  private readonly CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // Cleanup daily
+  private readonly CLEANUP_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+  constructor(
+    @Inject(forwardRef(() => TelegramService))
+    private readonly telegramService: TelegramService,
+    @Inject(forwardRef(() => AgentService))
+    private readonly agentService: AgentService,
+  ) {
+    this.dataDir = path.join(process.cwd(), 'data');
+  }
+
+  private getUserDir(chatId: string): string {
+    return path.join(this.dataDir, chatId);
+  }
+
+  private getSchedulePath(chatId: string): string {
+    return path.join(this.getUserDir(chatId), 'schedules.json');
+  }
+
+  async onModuleInit() {
+    this.loadJobs();
+    this.startJobChecker();
+    this.startCleanupService();
+    this.logger.log(`Scheduler initialized with ${this.jobs.filter((j) => j.status === 'active').length} active jobs`);
+  }
+
+  async onModuleDestroy() {
+    this.stopJobChecker();
+    this.stopCleanupService();
+  }
+
+  /**
+   * Load jobs from all user directories
+   */
+  private loadJobs(): void {
+    this.jobs = [];
+
+    try {
+      if (!fs.existsSync(this.dataDir)) {
+        fs.mkdirSync(this.dataDir, { recursive: true });
+        return;
+      }
+
+      // Scan all subdirectories in data folder
+      const entries = fs.readdirSync(this.dataDir, { withFileTypes: true });
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+
+        const chatId = entry.name;
+        const schedulePath = this.getSchedulePath(chatId);
+
+        if (fs.existsSync(schedulePath)) {
+          try {
+            const data = fs.readFileSync(schedulePath, 'utf-8');
+            const parsed: CronJobsData = JSON.parse(data);
+            if (parsed.jobs && Array.isArray(parsed.jobs)) {
+              this.jobs.push(...parsed.jobs);
+            }
+          } catch (error) {
+            this.logger.error(`Failed to load jobs for chat ${chatId}: ${error}`);
+          }
+        }
+      }
+
+      this.logger.log(`Loaded ${this.jobs.length} scheduled jobs from storage`);
+    } catch (error) {
+      this.logger.error(`Failed to load jobs: ${error}`);
+      this.jobs = [];
+    }
+  }
+
+  /**
+   * Save jobs to per-user files
+   */
+  private saveJobs(): void {
+    // Group jobs by chatId
+    const jobsByChat = new Map<string, ScheduledJob[]>();
+
+    for (const job of this.jobs) {
+      const existing = jobsByChat.get(job.chatId) || [];
+      existing.push(job);
+      jobsByChat.set(job.chatId, existing);
+    }
+
+    // Save each user's jobs to their directory
+    for (const [chatId, jobs] of jobsByChat) {
+      this.saveJobsForChat(chatId, jobs);
+    }
+  }
+
+  /**
+   * Save jobs for a specific chat
+   */
+  private saveJobsForChat(chatId: string, jobs: ScheduledJob[]): void {
+    try {
+      const userDir = this.getUserDir(chatId);
+      if (!fs.existsSync(userDir)) {
+        fs.mkdirSync(userDir, { recursive: true });
+      }
+
+      const schedulePath = this.getSchedulePath(chatId);
+      const data: CronJobsData = { jobs };
+      fs.writeFileSync(schedulePath, JSON.stringify(data, null, 2));
+    } catch (error) {
+      this.logger.error(`Failed to save jobs for chat ${chatId}: ${error}`);
+    }
+  }
+
+  /**
+   * Start the job checker interval
+   */
+  private startJobChecker(): void {
+    // Check immediately on startup
+    this.checkAndExecuteDueJobs();
+
+    // Then check periodically
+    this.checkInterval = setInterval(() => {
+      this.checkAndExecuteDueJobs();
+    }, this.CHECK_INTERVAL_MS);
+
+    this.logger.log('Job checker started');
+  }
+
+  /**
+   * Stop the job checker interval
+   */
+  private stopJobChecker(): void {
+    if (this.checkInterval) {
+      clearInterval(this.checkInterval);
+      this.checkInterval = null;
+      this.logger.log('Job checker stopped');
+    }
+  }
+
+  /**
+   * Start the cleanup service that removes old cancelled/completed jobs
+   */
+  private startCleanupService(): void {
+    // Run cleanup immediately on startup
+    this.cleanupOldJobs();
+
+    // Then run cleanup daily
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupOldJobs();
+    }, this.CLEANUP_INTERVAL_MS);
+
+    this.logger.log('Cleanup service started (runs daily)');
+  }
+
+  /**
+   * Stop the cleanup service
+   */
+  private stopCleanupService(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+      this.logger.log('Cleanup service stopped');
+    }
+  }
+
+  /**
+   * Remove cancelled and completed jobs older than 7 days
+   */
+  private cleanupOldJobs(): void {
+    const now = Date.now();
+    const initialCount = this.jobs.length;
+
+    this.jobs = this.jobs.filter((job) => {
+      // Keep active jobs
+      if (job.status === 'active') {
+        return true;
+      }
+
+      // For cancelled/completed jobs, check age
+      const jobDate = job.lastExecutedAt
+        ? new Date(job.lastExecutedAt).getTime()
+        : new Date(job.createdAt).getTime();
+
+      const age = now - jobDate;
+
+      // Keep if younger than cleanup age
+      return age < this.CLEANUP_AGE_MS;
+    });
+
+    const removedCount = initialCount - this.jobs.length;
+
+    if (removedCount > 0) {
+      this.saveJobs();
+      this.logger.log(`Cleanup: Removed ${removedCount} old cancelled/completed jobs`);
+    }
+  }
+
+  /**
+   * Check for due jobs and execute them
+   */
+  private async checkAndExecuteDueJobs(): Promise<void> {
+    const now = new Date();
+    const activeJobs = this.jobs.filter((j) => j.status === 'active');
+
+    for (const job of activeJobs) {
+      const isDue = this.isJobDue(job, now);
+
+      if (isDue) {
+        await this.executeJob(job);
+      }
+    }
+  }
+
+  /**
+   * Check if a job is due for execution
+   */
+  private isJobDue(job: ScheduledJob, now: Date): boolean {
+    if (job.scheduleType === 'once' && job.executeAt) {
+      const executeTime = new Date(job.executeAt);
+      // Check if the execution time has passed and job hasn't been executed yet
+      return now >= executeTime && job.executionCount === 0;
+    }
+
+    if (job.scheduleType === 'recurring' && job.cronExpression) {
+      return this.matchesCronExpression(job.cronExpression, now, job.lastExecutedAt);
+    }
+
+    return false;
+  }
+
+  /**
+   * Simple cron expression matcher
+   * Supports: minute hour dayOfMonth month dayOfWeek
+   * Example: "30 9 * * 1" = 9:30 AM every Monday
+   */
+  private matchesCronExpression(expression: string, now: Date, lastExecutedAt?: string): boolean {
+    // Avoid executing multiple times in the same minute
+    if (lastExecutedAt) {
+      const lastExec = new Date(lastExecutedAt);
+      if (
+        lastExec.getFullYear() === now.getFullYear() &&
+        lastExec.getMonth() === now.getMonth() &&
+        lastExec.getDate() === now.getDate() &&
+        lastExec.getHours() === now.getHours() &&
+        lastExec.getMinutes() === now.getMinutes()
+      ) {
+        return false;
+      }
+    }
+
+    const parts = expression.trim().split(/\s+/);
+    if (parts.length !== 5) {
+      this.logger.warn(`Invalid cron expression: ${expression}`);
+      return false;
+    }
+
+    const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+
+    const matches =
+      this.matchCronField(minute, now.getMinutes()) &&
+      this.matchCronField(hour, now.getHours()) &&
+      this.matchCronField(dayOfMonth, now.getDate()) &&
+      this.matchCronField(month, now.getMonth() + 1) && // Month is 1-12 in cron
+      this.matchCronField(dayOfWeek, now.getDay()); // 0 = Sunday
+
+    return matches;
+  }
+
+  /**
+   * Match a single cron field
+   */
+  private matchCronField(field: string, value: number): boolean {
+    // Wildcard
+    if (field === '*') {
+      return true;
+    }
+
+    // Exact match
+    if (/^\d+$/.test(field)) {
+      return parseInt(field, 10) === value;
+    }
+
+    // Range (e.g., 1-5)
+    if (field.includes('-')) {
+      const [start, end] = field.split('-').map((n) => parseInt(n, 10));
+      return value >= start && value <= end;
+    }
+
+    // List (e.g., 1,3,5)
+    if (field.includes(',')) {
+      const values = field.split(',').map((n) => parseInt(n, 10));
+      return values.includes(value);
+    }
+
+    // Step (e.g., */5)
+    if (field.startsWith('*/')) {
+      const step = parseInt(field.slice(2), 10);
+      return value % step === 0;
+    }
+
+    return false;
+  }
+
+  /**
+   * Execute a job and update its state
+   */
+  private async executeJob(job: ScheduledJob): Promise<void> {
+    this.logger.log(`Executing job ${job.id}: ${job.description}`);
+
+    try {
+      // Build the task prompt for the agent
+      const taskPrompt = this.buildTaskPrompt(job);
+
+      // Use the full agent to process the task (with all tools available)
+      const response = await this.agentService.processMessage(job.chatId, taskPrompt);
+
+      // Send the agent response to the user
+      const success = await this.telegramService.sendMessage(job.chatId, response);
+
+      if (success) {
+        // Update job state
+        job.executionCount++;
+        job.lastExecutedAt = new Date().toISOString();
+
+        // Check if job should be marked as completed
+        if (job.scheduleType === 'once') {
+          job.status = 'completed';
+        } else if (job.maxExecutions && job.executionCount >= job.maxExecutions) {
+          job.status = 'completed';
+        }
+
+        this.saveJobs();
+        this.logger.log(`Job ${job.id} executed successfully (count: ${job.executionCount})`);
+      } else {
+        this.logger.error(`Failed to send message for job ${job.id}`);
+      }
+    } catch (error) {
+      this.logger.error(`Error executing job ${job.id}: ${error}`);
+      // Try to send a fallback message
+      await this.telegramService.sendMessage(job.chatId, `⏰ *Reminder*: ${job.description}`);
+    }
+  }
+
+  /**
+   * Build the task prompt for the agent
+   * Just pass the task context as a user message
+   */
+  private buildTaskPrompt(job: ScheduledJob): string {
+    return job.taskContext;
+  }
+
+  /**
+   * Generate a unique job ID
+   */
+  private generateJobId(): string {
+    return `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  // ===== Public API =====
+
+  /**
+   * Check if a similar schedule already exists
+   * Returns the existing job if found, null otherwise
+   */
+  findSimilarJob(params: {
+    chatId: string;
+    cronExpression?: string;
+    executeAt?: string;
+  }): ScheduledJob | null {
+    const activeJobs = this.jobs.filter(
+      (j) => j.chatId === params.chatId && j.status === 'active',
+    );
+
+    for (const job of activeJobs) {
+      // For recurring jobs, check if same cron expression
+      if (params.cronExpression && job.cronExpression === params.cronExpression) {
+        return job;
+      }
+
+      // For one-time jobs, check if same execution time (within 5 minutes)
+      if (params.executeAt && job.executeAt) {
+        const newTime = new Date(params.executeAt).getTime();
+        const existingTime = new Date(job.executeAt).getTime();
+        const timeDiff = Math.abs(newTime - existingTime);
+        // Consider jobs within 5 minutes as duplicates
+        if (timeDiff < 5 * 60 * 1000) {
+          return job;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Create a new scheduled job
+   */
+  createJob(params: {
+    chatId: string;
+    description: string;
+    taskContext: string;
+    executeAt?: string;
+    cronExpression?: string;
+    maxExecutions?: number;
+  }): ScheduledJob | { duplicate: true; existingJob: ScheduledJob } {
+    // Check for duplicate schedules
+    const existingJob = this.findSimilarJob({
+      chatId: params.chatId,
+      cronExpression: params.cronExpression,
+      executeAt: params.executeAt,
+    });
+
+    if (existingJob) {
+      this.logger.warn(
+        `Duplicate schedule detected for chat ${params.chatId}. Existing job: ${existingJob.id}`,
+      );
+      return { duplicate: true, existingJob };
+    }
+
+    const scheduleType = params.cronExpression ? 'recurring' : 'once';
+
+    const job: ScheduledJob = {
+      id: this.generateJobId(),
+      chatId: params.chatId,
+      description: params.description,
+      taskContext: params.taskContext,
+      scheduleType,
+      executeAt: params.executeAt,
+      cronExpression: params.cronExpression,
+      maxExecutions: params.maxExecutions,
+      executionCount: 0,
+      createdAt: new Date().toISOString(),
+      status: 'active',
+    };
+
+    this.jobs.push(job);
+    this.saveJobs();
+
+    this.logger.log(`Created job ${job.id} for chat ${params.chatId}: ${params.description}`);
+
+    return job;
+  }
+
+  /**
+   * Get all jobs for a specific chat
+   */
+  getJobsForChat(chatId: string): ScheduledJob[] {
+    return this.jobs.filter((j) => j.chatId === chatId);
+  }
+
+  /**
+   * Get active jobs for a specific chat
+   */
+  getActiveJobsForChat(chatId: string): ScheduledJob[] {
+    return this.jobs.filter((j) => j.chatId === chatId && j.status === 'active');
+  }
+
+  /**
+   * Cancel a job
+   */
+  cancelJob(jobId: string, chatId: string): boolean {
+    const job = this.jobs.find((j) => j.id === jobId && j.chatId === chatId);
+
+    if (!job) {
+      return false;
+    }
+
+    job.status = 'cancelled';
+    this.saveJobs();
+
+    this.logger.log(`Cancelled job ${jobId}`);
+    return true;
+  }
+
+  /**
+   * Get a specific job by ID
+   */
+  getJob(jobId: string): ScheduledJob | undefined {
+    return this.jobs.find((j) => j.id === jobId);
+  }
+
+  /**
+   * Format job for display
+   */
+  formatJobForDisplay(job: ScheduledJob): string {
+    let schedule = '';
+    if (job.scheduleType === 'once' && job.executeAt) {
+      schedule = `Once at: ${new Date(job.executeAt).toLocaleString()}`;
+    } else if (job.cronExpression) {
+      schedule = `Recurring: ${this.formatCronHumanReadable(job.cronExpression)}`;
+      if (job.maxExecutions) {
+        schedule += ` (${job.executionCount}/${job.maxExecutions} executions)`;
+      }
+    }
+
+    return `*${job.description}*\nID: \`${job.id}\`\nSchedule: ${schedule}\nStatus: ${job.status}`;
+  }
+
+  /**
+   * Convert cron expression to human-readable format
+   */
+  private formatCronHumanReadable(cron: string): string {
+    const parts = cron.trim().split(/\s+/);
+    if (parts.length !== 5) return cron;
+
+    const [minute, hour, , , dayOfWeek] = parts;
+
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    let dayStr = 'every day';
+
+    if (dayOfWeek !== '*') {
+      if (dayOfWeek.includes(',')) {
+        const dayNums = dayOfWeek.split(',').map((d) => parseInt(d, 10));
+        dayStr = dayNums.map((d) => days[d]).join(', ');
+      } else if (dayOfWeek.includes('-')) {
+        const [start, end] = dayOfWeek.split('-').map((d) => parseInt(d, 10));
+        dayStr = `${days[start]} to ${days[end]}`;
+      } else {
+        dayStr = days[parseInt(dayOfWeek, 10)] || dayOfWeek;
+      }
+    }
+
+    let timeStr = '';
+    if (hour !== '*' && minute !== '*') {
+      const h = parseInt(hour, 10);
+      const m = parseInt(minute, 10);
+      const ampm = h >= 12 ? 'PM' : 'AM';
+      const h12 = h % 12 || 12;
+      timeStr = `${h12}:${m.toString().padStart(2, '0')} ${ampm}`;
+    } else {
+      timeStr = `${hour}:${minute}`;
+    }
+
+    return `${dayStr} at ${timeStr}`;
+  }
+}
