@@ -256,14 +256,14 @@ export class ToolsService {
           if ('duplicate' in result && result.duplicate) {
             const existingJob = result.existingJob;
             this.agentLogger.warn(LogEvent.TOOL_RESULT, `Duplicate schedule detected, existing: ${existingJob.id}`, { chatId });
-            
+
             let scheduleInfo = '';
             if (existingJob.scheduleType === 'once' && existingJob.executeAt) {
               scheduleInfo = `Scheduled for: ${new Date(existingJob.executeAt).toLocaleString()}`;
             } else if (existingJob.cronExpression) {
               scheduleInfo = `Recurring schedule: ${existingJob.cronExpression}`;
             }
-            
+
             return `⚠️ A similar schedule already exists!\n\nID: ${existingJob.id}\nDescription: ${existingJob.description}\n${scheduleInfo}\n\nNo new schedule was created to avoid duplication.`;
           }
 
@@ -389,9 +389,7 @@ Use maxExecutions to limit how many times a recurring task runs (e.g., 10 for "r
 
   private createExecuteBrowserTaskTool(chatId: string) {
     return tool(
-      async (input: { task: string }) => {
-        // Direct console log for debugging
-        console.log(`[ToolsService] executeBrowserTask called with: ${input.task}`);
+      async (input: { task: string }): Promise<[string, { screenshots: string[] }]> => {
         this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Browser task: ${input.task}`, { chatId });
 
         try {
@@ -403,7 +401,7 @@ Use maxExecutions to limit how many times a recurring task runs (e.g., 10 for "r
             { chatId },
           );
 
-          // Format the result for the agent
+          // Format the result for the agent (text only; screenshots go in artifact)
           let response = result.summary;
 
           if (result.data && result.data.length > 0) {
@@ -417,26 +415,22 @@ Use maxExecutions to limit how many times a recurring task runs (e.g., 10 for "r
             }
           }
 
-          // Add screenshots in a special format that can be detected and sent as images
-          if (result.screenshots && result.screenshots.length > 0) {
-            response += `\n\n**Screenshots captured:** ${result.screenshots.length}`;
-            // Use a special marker format that Telegram handler can detect and process
-            response += `\n[BROWSER_SCREENSHOTS:${result.screenshots.join(',')}]`;
-          }
-
           if (!result.success && result.error) {
             response += `\n\n**Error:** ${result.error}`;
           }
 
-          return response;
+          // Return [content, artifact] so ToolMessage gets text + screenshots
+          const screenshots = result.screenshots ?? [];
+          return [response, { screenshots }];
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
           this.agentLogger.error(LogEvent.TOOL_ERROR, `Browser task failed: ${errorMsg}`, { chatId });
-          return `Browser task failed: ${errorMsg}`;
+          return [`Browser task failed: ${errorMsg}`, { screenshots: [] }];
         }
       },
       {
         name: 'executeBrowserTask',
+        responseFormat: 'content_and_artifact' as const,
         description: `Execute a browser automation task. Use this when the user asks to visit a website, take a screenshot, or interact with web pages.
 
 IMPORTANT: Pass the user's request EXACTLY as they stated it. Do NOT add extra instructions or interpret what they might want. Only include what the user explicitly asked for.

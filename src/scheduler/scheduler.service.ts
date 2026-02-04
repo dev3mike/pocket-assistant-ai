@@ -350,10 +350,15 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       const taskPrompt = this.buildTaskPrompt(job);
 
       // Use the full agent to process the task (with all tools available)
-      const response = await this.agentService.processMessage(job.chatId, taskPrompt);
+      const { text, screenshots } = await this.agentService.processMessage(job.chatId, taskPrompt);
 
       // Send the agent response to the user
-      const success = await this.telegramService.sendMessage(job.chatId, response);
+      const success = await this.telegramService.sendMessage(job.chatId, text);
+
+      // Send any screenshots from browser tasks
+      if (screenshots.length > 0) {
+        await this.telegramService.sendPhotos(job.chatId, screenshots, '📸 Screenshot');
+      }
 
       if (success) {
         // Update job state

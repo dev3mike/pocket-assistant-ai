@@ -2,15 +2,16 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { UsageService } from '../usage/usage.service';
+import { ConfigService } from 'src/config/config.service';
 
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
   private model: ChatOpenAI;
 
-  constructor(private readonly usageService: UsageService) {
+  constructor(private readonly usageService: UsageService, private readonly configService: ConfigService) {
     this.model = new ChatOpenAI({
-      model: 'google/gemini-3-flash-preview',
+      model: this.configService.getConfig().model,
       temperature: 0.7, // Slightly creative for natural responses
       configuration: {
         baseURL: 'https://openrouter.ai/api/v1',

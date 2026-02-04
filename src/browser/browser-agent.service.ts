@@ -16,6 +16,7 @@ import { BrowserToolsService } from './browser-tools.service';
 import { TaskPlannerService, TaskPlan, TaskStep } from './task-planner.service';
 import { PageAnalyzerService } from './page-analyzer.service';
 import { AgentLoggerService, LogEvent } from '../logger/agent-logger.service';
+import { ConfigService } from 'src/config/config.service';
 
 export interface BrowserTaskResult {
   success: boolean;
@@ -54,6 +55,7 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
     private readonly taskPlanner: TaskPlannerService,
     private readonly pageAnalyzer: PageAnalyzerService,
     private readonly agentLogger: AgentLoggerService,
+    private readonly configService: ConfigService,
   ) { }
 
   async onModuleInit() {
@@ -71,7 +73,7 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.model = new ChatOpenAI({
-      model: 'google/gemini-3-flash-preview',
+      model: this.configService.getConfig().model,
       temperature: 0,
       configuration: {
         baseURL: 'https://openrouter.ai/api/v1',
@@ -87,11 +89,8 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
    * Execute a browser automation task
    */
   async executeTask(task: string, chatId?: string): Promise<BrowserTaskResult> {
-    // Direct console log for debugging
-    console.log(`[BrowserAgent] Received task: ${task}`);
 
     if (!this.isInitialized) {
-      console.log(`[BrowserAgent] ERROR: Not initialized`);
       return {
         success: false,
         taskDescription: task,
@@ -102,7 +101,6 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    console.log(`[BrowserAgent] Starting execution...`);
     this.agentLogger.info(LogEvent.AGENT_INIT, `Starting browser task: ${task}`, { chatId });
 
     try {
@@ -270,6 +268,16 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
             },
             reasoning: 'Extract data using vision analysis (screenshot + AI)',
           };
+        } else if (step.action === 'answer_vision') {
+          // Answer a question about what is visible (do you see X? / is there Y?)
+          actionDecision = {
+            action: 'browserAnswerVision',
+            params: {
+              question: step.target || step.description || 'What do you see on this page?',
+              fullPage: false,
+            },
+            reasoning: 'Answer question about page content using vision (screenshot + AI)',
+          };
         } else if (step.action === 'extract_html') {
           // HTML-based extraction (fallback method)
           actionDecision = {
@@ -333,13 +341,20 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
         let newExtractedData = [...extractedData];
         let newScreenshots = [...screenshots];
 
-        // Collect extracted data (from both vision and HTML extraction)
+        // Collect extracted data (from vision, vision QA, and HTML extraction)
         if (actionDecision.action === 'browserExtractVision' && resultData.extractedData) {
           newExtractedData.push({
             step: step.stepNumber,
             description: step.description,
             text: resultData.extractedData,
             method: 'vision',
+          });
+        } else if (actionDecision.action === 'browserAnswerVision' && resultData.answer) {
+          newExtractedData.push({
+            step: step.stepNumber,
+            description: step.description,
+            text: resultData.answer,
+            method: 'vision_answer',
           });
         } else if (actionDecision.action === 'browserExtractText' && resultData.text) {
           newExtractedData.push({
@@ -353,6 +368,9 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
         // Collect screenshots
         if (actionDecision.action === 'browserScreenshot' && resultData.filepath) {
           newScreenshots.push(resultData.filepath);
+        }
+        if (actionDecision.action === 'browserAnswerVision' && resultData.screenshotPath) {
+          newScreenshots.push(resultData.screenshotPath);
         }
 
         if (resultData.success === false) {

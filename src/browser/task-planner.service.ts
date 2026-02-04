@@ -2,8 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { UsageService } from '../usage/usage.service';
+import { ConfigService } from 'src/config/config.service';
 
-export type TaskStepAction = 
+export type TaskStepAction =
   | 'navigate'
   | 'click'
   | 'type'
@@ -12,6 +13,7 @@ export type TaskStepAction =
   | 'extract'
   | 'extract_vision'
   | 'extract_html'
+  | 'answer_vision'
   | 'wait'
   | 'verify'
   | 'complete';
@@ -37,9 +39,9 @@ export class TaskPlannerService {
   private readonly logger = new Logger(TaskPlannerService.name);
   private model: ChatOpenAI;
 
-  constructor(private readonly usageService: UsageService) {
+  constructor(private readonly usageService: UsageService, private readonly configService: ConfigService) {
     this.model = new ChatOpenAI({
-      model: 'google/gemini-3-flash-preview',
+      model: this.configService.getConfig().model,
       temperature: 0.3,
       configuration: {
         baseURL: 'https://openrouter.ai/api/v1',
@@ -65,6 +67,7 @@ Available actions:
 - screenshot: Take a screenshot (target = optional filename)
 - extract_vision: Extract data using vision/screenshot analysis (PRIMARY method for data extraction - sends screenshot to LLM)
 - extract_html: Extract text/data from HTML (FALLBACK only - use if vision extraction fails or data not visible in screenshot)
+- answer_vision: Answer a question about what is visible on the page (screenshot + LLM). Use when user asks "do you see X?", "is there Y?", "check if ...", "tell me if ..." (target or description = the question to answer)
 - wait: Wait for a duration (value = milliseconds, max 5000)
 - complete: Mark task as complete
 
@@ -85,12 +88,19 @@ DATA EXTRACTION STRATEGY (IMPORTANT):
   * Data is in hidden elements or requires scrolling through large lists
   * User specifically asks for raw HTML content
 
+QUESTION-ANSWERING ABOUT THE PAGE (answer_vision):
+- When user asks "check X and do you see ...?", "is there ... on the page?", "go to X and tell me if ...", use answer_vision
+- answer_vision takes a screenshot and asks the LLM to answer the user's question (Yes/No or short description)
+- target or description should be the question (e.g. "Is there a sale banner?", "Do you see a login form?")
+
 Examples:
 - "go to google.com" → navigate to google.com, complete
 - "go to example.com and screenshot" → navigate, screenshot, complete
 - "go to site.com, wait 3 seconds, screenshot" → navigate, wait 3000ms, screenshot, complete
 - "go to bonbast.com and get the USD rate" → navigate, extract_vision (with description: "USD exchange rate"), complete
 - "get prices from amazon.com/product" → navigate, extract_vision (with description: "product prices"), complete
+- "check example.com and do you see a welcome banner?" → navigate, answer_vision (question: "Do you see a welcome banner?"), complete
+- "go to x.com and is there anything about sales?" → navigate, answer_vision (question: "Is there anything about sales visible?"), complete
 
 Output ONLY valid JSON:
 {
@@ -103,7 +113,7 @@ Output ONLY valid JSON:
   "potentialChallenges": []
 }`;
 
-    const userPrompt = currentPageContext 
+    const userPrompt = currentPageContext
       ? `Current page context:\n${currentPageContext}\n\nTask: ${taskDescription}`
       : `Task: ${taskDescription}`;
 
@@ -117,8 +127,8 @@ Output ONLY valid JSON:
         this.usageService.recordUsageFromResponse(chatId, response);
       }
 
-      const content = typeof response.content === 'string' 
-        ? response.content 
+      const content = typeof response.content === 'string'
+        ? response.content
         : String(response.content);
 
       // Extract JSON from response
@@ -140,7 +150,7 @@ Output ONLY valid JSON:
 
     } catch (error) {
       this.logger.error(`Failed to plan task: ${error}`);
-      
+
       // Return a basic fallback plan
       return this.createFallbackPlan(taskDescription);
     }
@@ -160,9 +170,10 @@ Output ONLY valid JSON:
 
     const systemPrompt = `You are a browser automation task planner. A task partially completed and needs replanning.
 
-Available actions: navigate, click, type, scroll, screenshot, extract_vision, extract_html, wait, verify, complete
+Available actions: navigate, click, type, scroll, screenshot, extract_vision, extract_html, answer_vision, wait, verify, complete
 
 DATA EXTRACTION: Always prefer extract_vision (screenshot + AI vision) over extract_html. Only use extract_html if vision fails.
+QUESTION-ANSWERING: Use answer_vision when the task is to answer "do you see X?", "is there Y?", "check if ..." about the page.
 
 Analyze what has been done and create remaining steps to complete the task.
 
@@ -196,8 +207,8 @@ Create a plan for the remaining steps needed to complete the original task.`;
         this.usageService.recordUsageFromResponse(chatId, response);
       }
 
-      const content = typeof response.content === 'string' 
-        ? response.content 
+      const content = typeof response.content === 'string'
+        ? response.content
         : String(response.content);
 
       const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -252,7 +263,7 @@ For typing, find the input field ref that matches.
 
 Output ONLY valid JSON:
 {
-  "action": "browserNavigate|browserClick|browserType|browserScroll|browserScreenshot|browserExtractVision|browserExtractText|browserWait",
+  "action": "browserNavigate|browserClick|browserType|browserScroll|browserScreenshot|browserExtractVision|browserAnswerVision|browserExtractText|browserWait",
   "params": { ... action-specific parameters ... },
   "reasoning": "Brief explanation of why this action"
 }
@@ -263,10 +274,11 @@ For browserNavigate: params = { "url": "https://..." }
 For browserScroll: params = { "direction": "down", "amount": 500 }
 For browserScreenshot: params = { "fullPage": false }
 For browserExtractVision: params = { "description": "what data to extract from the screenshot" } - PREFERRED for data extraction
+For browserAnswerVision: params = { "question": "user's question about what is visible (e.g. Do you see X? Is there Y?)" } - for check/see/is there questions
 For browserExtractText: params = { "selector": "optional" } - FALLBACK only if vision fails
 For browserWait: params = { "milliseconds": 1000 } or { "forText": "..." }
 
-IMPORTANT: For data extraction, ALWAYS prefer browserExtractVision over browserExtractText. Vision-based extraction reads the screenshot with AI and is more accurate for visible content.`;
+IMPORTANT: For data extraction, ALWAYS prefer browserExtractVision over browserExtractText. For "do you see X?" / "is there Y?" use browserAnswerVision.`;
 
     try {
       const response = await this.model.invoke([
@@ -278,8 +290,8 @@ IMPORTANT: For data extraction, ALWAYS prefer browserExtractVision over browserE
         this.usageService.recordUsageFromResponse(chatId, response);
       }
 
-      const content = typeof response.content === 'string' 
-        ? response.content 
+      const content = typeof response.content === 'string'
+        ? response.content
         : String(response.content);
 
       const jsonMatch = content.match(/\{[\s\S]*\}/);

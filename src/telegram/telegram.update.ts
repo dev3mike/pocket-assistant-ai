@@ -24,9 +24,6 @@ _Copy this ID and send it to the owner to be added to the allowed list._`;
 export class TelegramUpdate {
   private readonly logger = new Logger(TelegramUpdate.name);
 
-  // Regex to detect browser screenshots in response
-  private readonly screenshotPattern = /\[BROWSER_SCREENSHOTS:([^\]]+)\]/;
-
   constructor(
     private readonly agentService: AgentService,
     private readonly agentLogger: AgentLoggerService,
@@ -311,12 +308,9 @@ export class TelegramUpdate {
     }, 4000);
 
     try {
-      const response = await this.agentService.processMessage(chatIdStr, text);
+      const { text: textResponse, screenshots: screenshotPaths } = await this.agentService.processMessage(chatIdStr, text);
 
       clearInterval(typingInterval);
-
-      // Check for browser screenshots in response
-      const { textResponse, screenshotPaths } = this.extractScreenshots(response);
 
       // Telegram has a 4096 character limit per message
       if (textResponse.length > 4000) {
@@ -328,7 +322,7 @@ export class TelegramUpdate {
         await this.sendWithMarkdown(ctx, textResponse);
       }
 
-      // Send screenshots if any were captured
+      // Send screenshots from tool artifact (no need to parse marker from text)
       if (screenshotPaths.length > 0) {
         await this.telegramService.sendPhotos(chatIdStr, screenshotPaths, '📸 Screenshot');
       }
@@ -412,34 +406,5 @@ export class TelegramUpdate {
     }
 
     return chunks;
-  }
-
-  /**
-   * Extract screenshot paths from response and return cleaned text
-   */
-  private extractScreenshots(response: string): {
-    textResponse: string;
-    screenshotPaths: string[];
-  } {
-    const match = response.match(this.screenshotPattern);
-
-    if (!match) {
-      return { textResponse: response, screenshotPaths: [] };
-    }
-
-    // Extract screenshot paths
-    const screenshotPaths = match[1]
-      .split(',')
-      .map((p) => p.trim())
-      .filter((p) => p.length > 0);
-
-    // Remove the screenshot marker from response and clean up
-    let textResponse = response
-      .replace(this.screenshotPattern, '')
-      .replace(/\*\*Screenshots captured:\*\*\s*\d+\s*/g, '')
-      .replace(/\*Screenshots captured:\*\s*\d+\s*/g, '')  // After conversion to telegram markdown
-      .trim();
-
-    return { textResponse, screenshotPaths };
   }
 }

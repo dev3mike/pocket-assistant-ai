@@ -6,6 +6,7 @@ import { HumanMessage } from '@langchain/core/messages';
 import * as z from 'zod';
 import * as path from 'path';
 import * as fs from 'fs';
+import { ConfigService } from 'src/config/config.service';
 
 export interface AccessibilityNode {
   role: string;
@@ -44,7 +45,7 @@ export class BrowserToolsService implements OnModuleDestroy {
   // Fallback profile for bot when primary is locked
   private readonly botUserDataDir: string;
 
-  constructor() {
+  constructor(private readonly configService: ConfigService) {
     this.screenshotDir = path.join(process.cwd(), 'data', 'screenshots');
     this.userDataDir = path.join(process.cwd(), 'data', 'browser-profile');
     this.botUserDataDir = path.join(process.cwd(), 'data', 'browser-profile-bot');
@@ -467,6 +468,7 @@ export class BrowserToolsService implements OnModuleDestroy {
       browserScroll: this.createScrollTool(),
       browserScreenshot: this.createScreenshotTool(),
       browserExtractVision: this.createExtractVisionTool(),
+      browserAnswerVision: this.createAnswerVisionTool(),
       browserExtractText: this.createExtractTextTool(),
       browserWait: this.createWaitTool(),
       browserClose: this.createCloseTool(),
@@ -689,6 +691,9 @@ export class BrowserToolsService implements OnModuleDestroy {
 
           const filepath = path.join(this.screenshotDir, filename);
 
+          // wait for 2 seconds
+          await page.waitForTimeout(2000);
+
           await page.screenshot({
             path: filepath,
             fullPage: input.fullPage ?? false,
@@ -734,6 +739,9 @@ export class BrowserToolsService implements OnModuleDestroy {
           const filename = `vision-extract-${timestamp}.png`;
           const filepath = path.join(this.screenshotDir, filename);
 
+          // wait for 2 seconds
+          await page.waitForTimeout(2000);
+
           await page.screenshot({
             path: filepath,
             fullPage: input.fullPage ?? false,
@@ -748,7 +756,7 @@ export class BrowserToolsService implements OnModuleDestroy {
 
           // Use vision model to extract data
           const visionModel = new ChatOpenAI({
-            model: 'google/gemini-2.0-flash-001',
+            model: this.configService.getConfig().vision_model,
             temperature: 0,
             configuration: {
               baseURL: 'https://openrouter.ai/api/v1',
@@ -824,6 +832,107 @@ Return ONLY the extracted data, nothing else. Be concise and accurate.`,
         schema: z.object({
           description: z.string().describe('What data to extract from the page (e.g., "USD exchange rate", "product price", "table of stock prices")'),
           fullPage: z.boolean().optional().describe('Capture full scrollable page (default: false, just visible viewport)'),
+        }),
+      },
+    );
+  }
+
+  /**
+   * Take a screenshot and ask the vision model to answer a question about what is visible.
+   * Use for: "do you see X?", "is there Y?", "check if ..." – returns a natural-language answer.
+   */
+  private createAnswerVisionTool() {
+    return tool(
+      async (input: { question: string; fullPage?: boolean }) => {
+        try {
+          const page = await this.ensureBrowser();
+
+          const timestamp = Date.now();
+          const filename = `vision-answer-${timestamp}.png`;
+          const filepath = path.join(this.screenshotDir, filename);
+
+          await page.waitForTimeout(2000);
+
+          await page.screenshot({
+            path: filepath,
+            fullPage: input.fullPage ?? false,
+            type: 'png',
+          });
+
+          this.logger.log(`Screenshot taken for vision QA: ${filepath}`);
+
+          const imageBuffer = fs.readFileSync(filepath);
+          const base64Image = imageBuffer.toString('base64');
+
+          const visionModel = new ChatOpenAI({
+            model: this.configService.getConfig().vision_model,
+            temperature: 0,
+            configuration: {
+              baseURL: 'https://openrouter.ai/api/v1',
+              apiKey: process.env.OPENROUTER_API_KEY,
+            },
+          });
+
+          const pageUrl = page.url();
+          const pageTitle = await page.title();
+
+          const response = await visionModel.invoke([
+            new HumanMessage({
+              content: [
+                {
+                  type: 'text',
+                  text: `You are looking at a screenshot of a webpage. Answer the user's question about what you see.
+
+Page URL: ${pageUrl}
+Page Title: ${pageTitle}
+
+QUESTION: ${input.question}
+
+Instructions:
+1. Look at the screenshot carefully.
+2. Answer the question in a clear, concise way (one or a few sentences).
+3. If the question is "do you see X?" or "is there Y?", answer Yes/No and briefly describe what you see or don't see.
+4. If you cannot tell from the screenshot, say "I cannot determine from the screenshot" and why.
+5. Do not make up content that is not visible.`,
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:image/png;base64,${base64Image}`,
+                  },
+                },
+              ],
+            }),
+          ]);
+
+          const answer = typeof response.content === 'string'
+            ? response.content
+            : String(response.content);
+
+          this.logger.log(`Vision QA completed: ${answer.slice(0, 80)}...`);
+
+          return JSON.stringify({
+            success: true,
+            answer,
+            screenshotPath: filepath,
+            method: 'vision_answer',
+          });
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          this.logger.error(`Vision QA failed: ${errorMsg}`);
+          return JSON.stringify({
+            success: false,
+            error: errorMsg,
+            method: 'vision_answer',
+          });
+        }
+      },
+      {
+        name: 'browserAnswerVision',
+        description: 'Answer a question about what is visible on the current page. Takes a screenshot and uses AI vision to answer (e.g. "Do you see a sale banner?", "Is there a login form?", "What is the main headline?"). Use for check/see/is there/tell me if style questions.',
+        schema: z.object({
+          question: z.string().describe('The question to answer about the page (e.g. "Do you see a sale banner?", "Is there a login form?")'),
+          fullPage: z.boolean().optional().describe('Capture full scrollable page (default: false)'),
         }),
       },
     );

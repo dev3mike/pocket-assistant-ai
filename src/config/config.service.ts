@@ -5,6 +5,7 @@ import * as path from 'path';
 export interface AppConfig {
   enableLogging: boolean;
   model: string;
+  vision_model: string;
   security: {
     allowedUserIds: string[];
   };
@@ -13,6 +14,7 @@ export interface AppConfig {
 const DEFAULT_CONFIG: AppConfig = {
   enableLogging: false,
   model: 'google/gemini-3-flash-preview',
+  vision_model: 'openai/gpt-4o-mini',
   security: {
     allowedUserIds: [],
   },
@@ -99,6 +101,7 @@ export class ConfigService implements OnModuleInit, OnModuleDestroy {
         this.config = {
           enableLogging: loaded.enableLogging ?? DEFAULT_CONFIG.enableLogging,
           model: loaded.model ?? DEFAULT_CONFIG.model,
+          vision_model: loaded.vision_model ?? DEFAULT_CONFIG.vision_model,
           security: { ...DEFAULT_CONFIG.security, ...loaded.security },
         };
         this.logger.log('Configuration loaded from config.json');

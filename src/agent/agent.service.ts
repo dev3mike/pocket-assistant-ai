@@ -318,9 +318,9 @@ ${basePrompt}`;
       .compile();
   }
 
-  async processMessage(chatId: string, userMessage: string): Promise<string> {
+  async processMessage(chatId: string, userMessage: string): Promise<{ text: string; screenshots: string[] }> {
     if (!this.isInitialized) {
-      return 'Sorry, the AI assistant is still initializing. Please try again in a moment.';
+      return { text: 'Sorry, the AI assistant is still initializing. Please try again in a moment.', screenshots: [] };
     }
 
     this.agentLogger.info(LogEvent.MESSAGE_RECEIVED, `Received message`, {
@@ -347,7 +347,15 @@ ${basePrompt}`;
       });
 
       const finalContent = result.messages.at(-1)?.content;
-      const response = typeof finalContent === 'string' ? finalContent : JSON.stringify(finalContent);
+      const text = typeof finalContent === 'string' ? finalContent : JSON.stringify(finalContent);
+
+      // Collect screenshot paths from tool message artifacts (executeBrowserTask returns content_and_artifact)
+      const screenshots: string[] = [];
+      for (const msg of result.messages ?? []) {
+        if (ToolMessage.isInstance(msg) && msg.artifact?.screenshots?.length) {
+          screenshots.push(...msg.artifact.screenshots);
+        }
+      }
 
       // Record token usage
       const inputTokens = result.inputTokens || 0;
@@ -358,16 +366,16 @@ ${basePrompt}`;
         this.agentLogger.debug(LogEvent.LLM_RESPONSE, `Token usage: ${inputTokens} in, ${outputTokens} out`, { chatId });
       }
 
-      // Save assistant response to memory
-      await this.memoryService.addMessage(chatId, 'assistant', response);
+      // Save assistant response to memory (text only)
+      await this.memoryService.addMessage(chatId, 'assistant', text);
 
-      this.agentLogger.info(LogEvent.RESPONSE_SENT, `Sent response (${response.length} chars)`, { chatId });
+      this.agentLogger.info(LogEvent.RESPONSE_SENT, `Sent response (${text.length} chars)`, { chatId });
 
-      return response;
+      return { text, screenshots };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.agentLogger.error(LogEvent.ERROR, errorMessage, { chatId });
-      return `Sorry, I encountered an error: ${errorMessage}`;
+      return { text: `Sorry, I encountered an error: ${errorMessage}`, screenshots: [] };
     }
   }
 
