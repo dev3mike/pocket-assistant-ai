@@ -700,7 +700,7 @@ export class BrowserToolsService implements OnModuleDestroy {
           const filepath = path.join(this.screenshotDir, filename);
 
           // wait for 2 seconds
-          await page.waitForTimeout(2000);
+          await page.waitForTimeout(4000);
 
           await page.screenshot({
             path: filepath,
@@ -748,7 +748,7 @@ export class BrowserToolsService implements OnModuleDestroy {
           const filepath = path.join(this.screenshotDir, filename);
 
           // wait for 2 seconds
-          await page.waitForTimeout(2000);
+          await page.waitForTimeout(4000);
 
           await page.screenshot({
             path: filepath,
@@ -859,7 +859,7 @@ Return ONLY the extracted data, nothing else. Be concise and accurate.`,
           const filename = `vision-answer-${timestamp}.png`;
           const filepath = path.join(this.screenshotDir, filename);
 
-          await page.waitForTimeout(2000);
+          await page.waitForTimeout(4000);
 
           await page.screenshot({
             path: filepath,
