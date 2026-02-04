@@ -168,7 +168,7 @@ When the user asks to be reminded about something or schedule a task, use the cr
 IMPORTANT: Before scheduling, ensure you have COMPLETE details about what should happen. If the request is vague (e.g., "schedule a morning brief"), ask what it should include before creating the schedule. Do NOT make assumptions about what the user wants.
 For natural language time like "in 2 hours" or "tomorrow at 9am", convert to ISO date format for one-time tasks.
 For recurring patterns like "every Monday" or "daily at 9am", use cron expressions.
-When the user asks to visit a website, search the web, extract information from a webpage, or perform any web-based task, use the executeBrowserTask tool.`;
+Tool choice for URLs: By default use httpRequest to check or fetch any URL (RSS feeds, APIs, web pages, etc.). Use executeBrowserTask only when the user explicitly asks to use the browser (e.g. "open in browser", "use the browser", "take a screenshot of ...", "visit ... in browser", or when they need to interact with the page, fill forms, or see the page visually).`;
 
     if (soulContext) {
       return `${soulContext}

@@ -44,8 +44,10 @@ export class TelegramService implements OnModuleInit {
    * Used for scheduled tasks and notifications
    */
   async sendMessage(chatId: string, text: string): Promise<boolean> {
+    // Telegram API returns 400 when message text is empty
+    const messageText = (text && text.trim()) ? text.trim() : '(No response)';
     try {
-      await this.bot.telegram.sendMessage(chatId, text, {
+      await this.bot.telegram.sendMessage(chatId, messageText, {
         parse_mode: 'Markdown',
       });
       this.logger.log(`Message sent to chat ${chatId}`);
@@ -53,7 +55,7 @@ export class TelegramService implements OnModuleInit {
     } catch (error) {
       // Try without markdown if it fails
       try {
-        await this.bot.telegram.sendMessage(chatId, text);
+        await this.bot.telegram.sendMessage(chatId, messageText);
         this.logger.log(`Message sent to chat ${chatId} (plain text fallback)`);
         return true;
       } catch (plainError) {

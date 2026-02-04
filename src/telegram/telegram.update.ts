@@ -319,14 +319,16 @@ export class TelegramUpdate {
 
       clearInterval(typingInterval);
 
+      // Telegram rejects empty messages (400: message text is empty)
+      const textToSend = textResponse.trim() || "I didn't generate a response for that. Please try again.";
       // Telegram has a 4096 character limit per message
-      if (textResponse.length > 4000) {
-        const chunks = this.splitMessage(textResponse, 4000);
+      if (textToSend.length > 4000) {
+        const chunks = this.splitMessage(textToSend, 4000);
         for (const chunk of chunks) {
           await this.sendWithMarkdown(ctx, chunk);
         }
       } else {
-        await this.sendWithMarkdown(ctx, textResponse);
+        await this.sendWithMarkdown(ctx, textToSend);
       }
 
       // Send screenshots from tool artifact (no need to parse marker from text)
@@ -345,15 +347,16 @@ export class TelegramUpdate {
    * Try to send message with Markdown parsing, fall back to plain text if it fails
    */
   private async sendWithMarkdown(ctx: Context, text: string): Promise<void> {
+    const safeText = text.trim() || '(No content)';
     // Convert standard markdown to Telegram-compatible markdown
-    const telegramText = this.convertToTelegramMarkdown(text);
+    const telegramText = this.convertToTelegramMarkdown(safeText);
 
     try {
       await ctx.reply(telegramText, { parse_mode: 'Markdown' });
     } catch {
       // If markdown parsing fails, try plain text (strip markdown)
       try {
-        const plainText = this.stripMarkdown(text);
+        const plainText = this.stripMarkdown(safeText);
         await ctx.reply(plainText);
       } catch (plainError) {
         this.logger.error(`Failed to send message: ${plainError}`);

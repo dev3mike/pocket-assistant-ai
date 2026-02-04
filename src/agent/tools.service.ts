@@ -1,9 +1,10 @@
 /**
  * Defines the tools the MAIN AGENT can call. Provides getCurrentDate, getProfile,
- * updateProfile, createSchedule, listSchedules, cancelSchedule, and executeBrowserTask.
+ * updateProfile, createSchedule, listSchedules, cancelSchedule, httpRequest, and executeBrowserTask.
  * When the main agent calls executeBrowserTask(task), this service invokes the
  * Browser Agent (BrowserAgentService) and returns summary + screenshots as a
- * content_and_artifact ToolMessage. Does not run any agent loop itself.
+ * content_and_artifact ToolMessage. httpRequest performs curl-like HTTP calls (method, url, headers, query params, body).
+ * Does not run any agent loop itself.
  */
 import { Injectable, Logger } from '@nestjs/common';
 import { tool } from '@langchain/core/tools';
@@ -50,6 +51,7 @@ export class ToolsService {
       listSchedules: this.createListSchedulesTool(chatId),
       cancelSchedule: this.createCancelScheduleTool(chatId),
       executeBrowserTask: this.createExecuteBrowserTaskTool(chatId),
+      httpRequest: this.createHttpRequestTool(chatId),
     };
   }
 
@@ -392,6 +394,98 @@ Use maxExecutions to limit how many times a recurring task runs (e.g., 10 for "r
     );
   }
 
+  // ===== HTTP Request Tool =====
+
+  private createHttpRequestTool(chatId: string) {
+    return tool(
+      async (input: {
+        method: string;
+        url: string;
+        headers?: Record<string, string>;
+        queryParams?: Record<string, string | number>;
+        body?: string | Record<string, unknown>;
+      }) => {
+        try {
+          const url = new URL(input.url);
+          if (input.queryParams && Object.keys(input.queryParams).length > 0) {
+            for (const [key, value] of Object.entries(input.queryParams)) {
+              url.searchParams.set(key, String(value));
+            }
+          }
+
+          const headers = new Headers(input.headers ?? {});
+          let body: string | undefined;
+          if (input.body !== undefined && input.body !== null && input.body !== '') {
+            if (typeof input.body === 'string') {
+              body = input.body;
+            } else {
+              if (!headers.has('Content-Type')) {
+                headers.set('Content-Type', 'application/json');
+              }
+              body = JSON.stringify(input.body);
+            }
+          }
+
+          const response = await fetch(url.toString(), {
+            method: input.method,
+            headers,
+            body: ['GET', 'HEAD'].includes(input.method) ? undefined : body,
+          });
+
+          const contentType = response.headers.get('content-type') ?? '';
+          let responseBody: string;
+          if (contentType.includes('application/json')) {
+            try {
+              responseBody = JSON.stringify(await response.json(), null, 2);
+            } catch {
+              responseBody = await response.text();
+            }
+          } else {
+            responseBody = await response.text();
+          }
+
+          const summary = `HTTP ${response.status} ${response.statusText}\n${responseBody}`;
+          this.agentLogger.info(
+            response.ok ? LogEvent.TOOL_RESULT : LogEvent.TOOL_ERROR,
+            `httpRequest: ${input.method} ${input.url} → ${response.status}`,
+            { chatId },
+          );
+          return summary;
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          this.agentLogger.error(LogEvent.TOOL_ERROR, `httpRequest failed: ${errorMsg}`, { chatId });
+          return `Error: ${errorMsg}`;
+        }
+      },
+      {
+        name: 'httpRequest',
+        description: `Make an HTTP request (like curl). Use by DEFAULT for checking or fetching any URL: RSS feeds, APIs, web pages, or any endpoint. Use when the user or a scheduled task asks to call an API, fetch a URL, check a feed, or send data to an endpoint. Only use executeBrowserTask when the user explicitly asks to use the browser.
+
+Supports: method (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS), url, optional headers, optional query params, optional body.
+- For JSON APIs: use body as an object; Content-Type: application/json is set automatically if not provided.
+- User can ask to add headers (e.g. Authorization, API keys, custom headers).`,
+        schema: z.object({
+          method: z
+            .enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])
+            .describe('HTTP method'),
+          url: z.string().describe('Full URL (e.g. https://api.example.com/data)'),
+          headers: z
+            .record(z.string(), z.string())
+            .optional()
+            .describe('Optional request headers (e.g. { "Authorization": "Bearer token", "X-Custom": "value" })'),
+          queryParams: z
+            .record(z.string(), z.union([z.string(), z.number()]))
+            .optional()
+            .describe('Optional query parameters to append to the URL'),
+          body: z
+            .union([z.string(), z.record(z.string(), z.unknown())])
+            .optional()
+            .describe('Optional request body. Use object for JSON; string for raw body.'),
+        }),
+      },
+    );
+  }
+
   // ===== Browser Automation Tools =====
 
   private createExecuteBrowserTaskTool(chatId: string) {
@@ -438,14 +532,14 @@ Use maxExecutions to limit how many times a recurring task runs (e.g., 10 for "r
       {
         name: 'executeBrowserTask',
         responseFormat: 'content_and_artifact' as const,
-        description: `Execute a browser automation task. Use this when the user asks to visit a website, take a screenshot, or interact with web pages.
+        description: `Execute a browser automation task. Use ONLY when the user explicitly asks to use the browser (e.g. "open in browser", "use the browser", "take a screenshot", "visit ... in browser") or when they need to interact with a page (click, type, fill forms, see the page visually). For simply checking or fetching a URL (RSS, API, feed, or page content), use httpRequest instead.
 
 IMPORTANT: Pass the user's request EXACTLY as they stated it. Do NOT add extra instructions or interpret what they might want. Only include what the user explicitly asked for.
 
-Examples:
-- User says "go to bonbast.com" → task: "go to bonbast.com"
+Examples (browser explicitly requested):
+- User says "open bonbast.com in the browser" → task: "go to bonbast.com"
 - User says "take a screenshot of google.com" → task: "take a screenshot of google.com"
-- User says "go to example.com, wait 5 seconds, take screenshot" → task: "go to example.com, wait 5 seconds, take screenshot"`,
+- User says "use the browser to go to example.com" → task: "go to example.com"`,
         schema: z.object({
           task: z.string().describe('The EXACT browser task as stated by the user. Do not add or interpret - pass exactly what was requested.'),
         }),
