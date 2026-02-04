@@ -1,3 +1,11 @@
+/**
+ * ENTRY POINT for scheduled tasks. Stores and runs recurring or one-time jobs
+ * (e.g. "remind me at 9am" or "every day check example.com"). When a job is due,
+ * it calls the MAIN AGENT (AgentService.processMessage) with the job's task text,
+ * then sends the agent's reply (and any screenshots) via TelegramService. The
+ * main agent may in turn call executeBrowserTask, so scheduled browser checks
+ * use the same flow as user-initiated browser tasks.
+ */
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, forwardRef } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';

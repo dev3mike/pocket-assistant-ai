@@ -1,3 +1,11 @@
+/**
+ * Low-level browser tools used by the BROWSER SUB-AGENT. Manages a single Playwright
+ * browser instance and exposes tools: navigate, click, type, scroll, screenshot,
+ * browserExtractVision (screenshot + LLM to extract data), browserAnswerVision
+ * (screenshot + LLM to answer "do you see X?"), browserExtractText (HTML), wait.
+ * Does not plan tasks; the Browser Agent calls these tools step by step according
+ * to the plan from TaskPlannerService.
+ */
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { tool } from '@langchain/core/tools';
 import { chromium, Browser, BrowserContext, Page } from 'playwright';

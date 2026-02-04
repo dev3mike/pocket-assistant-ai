@@ -1,3 +1,8 @@
+/**
+ * Tracks token usage per chat and per month (input/output). Called by the MAIN
+ * AGENT and Browser/TaskPlanner when an LLM is invoked. Used for logging and
+ * optional billing; no impact on message or agent flow.
+ */
 import { Injectable, Logger } from '@nestjs/common';
 import { AIMessage } from '@langchain/core/messages';
 import * as fs from 'fs';

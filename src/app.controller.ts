@@ -1,3 +1,7 @@
+/**
+ * HTTP root endpoint (GET /). Returns a simple "bot is running" message; the real
+ * app is the Telegram bot and agents, not this controller.
+ */
 import { Controller, Get } from '@nestjs/common';
 import { AppService } from './app.service';
 

@@ -1,3 +1,9 @@
+/**
+ * Analyzes the page structure (navigation, forms, buttons, links) from the
+ * accessibility tree. Used by the BROWSER SUB-AGENT and TaskPlannerService to
+ * understand the current page when deciding clicks or typing targets. Helper
+ * only; not part of the main message flow.
+ */
 import { Injectable, Logger } from '@nestjs/common';
 import { AccessibilityNode } from './browser-tools.service';
 

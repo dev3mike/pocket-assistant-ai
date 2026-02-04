@@ -1,3 +1,8 @@
+/**
+ * Structured logging for agent events (message received, tool call, LLM invoke,
+ * etc.). Writes to a log file and optional console. Used by AgentService,
+ * ToolsService, and BrowserAgentService; no flow logic.
+ */
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '../config/config.service';
 import * as fs from 'fs';

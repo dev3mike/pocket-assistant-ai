@@ -1,3 +1,11 @@
+/**
+ * BROWSER SUB-AGENT – Runs only when the main agent calls executeBrowserTask.
+ * Takes a task string (e.g. "go to example.com and get the USD rate"), plans steps
+ * via TaskPlannerService, runs them using BrowserToolsService (navigate, screenshot,
+ * extract_vision, answer_vision, etc.), then returns a summary plus extracted data
+ * and screenshot paths. Used by both direct user messages and by the Scheduler
+ * when a scheduled job triggers a browser task.
+ */
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, HumanMessage, SystemMessage, BaseMessage } from '@langchain/core/messages';

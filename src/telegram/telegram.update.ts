@@ -1,3 +1,10 @@
+/**
+ * ENTRY POINT for user messages over Telegram. Handles /start, /help, /clear,
+ * /tools, /profile, /schedules, and text messages. For text: checks onboarding
+ * (SoulService), then calls the MAIN AGENT (AgentService.processMessage), then
+ * sends the reply and any screenshots back to the user. Does not run an agent;
+ * it only receives input and sends output.
+ */
 import { Logger } from '@nestjs/common';
 import { Update, Ctx, Start, Help, On, Command } from 'nestjs-telegraf';
 import { Context } from 'telegraf';

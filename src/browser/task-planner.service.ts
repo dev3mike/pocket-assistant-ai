@@ -1,3 +1,10 @@
+/**
+ * Plans browser tasks for the BROWSER SUB-AGENT. Turns a task string (e.g. "go to
+ * bonbast.com and get the USD rate") into a list of steps: navigate, screenshot,
+ * extract_vision, answer_vision, wait, complete, etc. Also used to replan after
+ * failures and to determineNextAction (e.g. which element to click) when the
+ * browser agent needs to resolve a step into concrete tool parameters.
+ */
 import { Injectable, Logger } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';

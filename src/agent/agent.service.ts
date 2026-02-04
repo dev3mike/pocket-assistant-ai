@@ -1,3 +1,12 @@
+/**
+ * MAIN AGENT – Orchestrates all user conversations and tool use.
+ * Runs a LangGraph loop: receives messages (from Telegram or Scheduler), loads memory,
+ * calls the LLM with tools (getProfile, createSchedule, executeBrowserTask, etc.),
+ * executes tool calls, then returns the final reply. When the user asks for browser
+ * tasks (e.g. "go to x.com"), it calls the executeBrowserTask tool, which delegates
+ * to the Browser Agent (sub-agent). Entry points: processMessage() from Telegram
+ * and from Scheduler when a job runs.
+ */
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
 import { MultiServerMCPClient } from '@langchain/mcp-adapters';

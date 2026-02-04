@@ -1,3 +1,10 @@
+/**
+ * User profile and onboarding. Stores per-chat "soul" data (AI name, character,
+ * user name, etc.) and runs the onboarding flow (questions, then save). Used by
+ * the MAIN AGENT (for getProfile/updateProfile tools and system prompt) and by
+ * TelegramUpdate (to decide whether to show onboarding or pass messages to the
+ * agent). No agent loop; just state and AI-generated onboarding replies via AiService.
+ */
 import { Injectable, Logger } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';

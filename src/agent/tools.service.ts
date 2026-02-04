@@ -1,3 +1,10 @@
+/**
+ * Defines the tools the MAIN AGENT can call. Provides getCurrentDate, getProfile,
+ * updateProfile, createSchedule, listSchedules, cancelSchedule, and executeBrowserTask.
+ * When the main agent calls executeBrowserTask(task), this service invokes the
+ * Browser Agent (BrowserAgentService) and returns summary + screenshots as a
+ * content_and_artifact ToolMessage. Does not run any agent loop itself.
+ */
 import { Injectable, Logger } from '@nestjs/common';
 import { tool } from '@langchain/core/tools';
 import { ConfigService } from '../config/config.service';

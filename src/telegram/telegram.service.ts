@@ -1,3 +1,8 @@
+/**
+ * Sends messages and photos to Telegram (e.g. reply to user, send scheduled
+ * reminder, send screenshots from browser tasks). Used by TelegramUpdate and
+ * SchedulerService. No agent or business logic; pure Telegram API wrapper.
+ */
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectBot } from 'nestjs-telegraf';
 import { Telegraf, Context } from 'telegraf';

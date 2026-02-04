@@ -1,3 +1,8 @@
+/**
+ * Conversation memory per chat. Persists recent messages and optional summary
+ * to disk. The MAIN AGENT loads this before each turn (processMessage) and
+ * saves the new assistant reply after. Used only by AgentService; no agent logic.
+ */
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';

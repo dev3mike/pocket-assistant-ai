@@ -1,3 +1,9 @@
+/**
+ * Standalone LLM calls that are not part of the main agent loop. Used for
+ * onboarding replies (SoulService), welcome-back message, and memory summarization
+ * (MemoryService). The MAIN AGENT uses its own model in AgentService; this service
+ * is for one-off prompts (e.g. "generate next onboarding question").
+ */
 import { Injectable, Logger } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';

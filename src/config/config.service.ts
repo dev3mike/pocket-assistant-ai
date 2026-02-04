@@ -1,3 +1,8 @@
+/**
+ * App configuration (model names, vision model, allowed user IDs, logging flag).
+ * Loaded from data/config.json and watched for changes. Used by agents and
+ * services that need model or security settings; no flow logic.
+ */
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
