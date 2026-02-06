@@ -21,10 +21,10 @@ import {
 } from '@langchain/langgraph';
 import * as z from 'zod';
 import { BrowserToolsService } from './browser-tools.service';
-import { TaskPlannerService, TaskPlan, TaskStep } from './task-planner.service';
-import { PageAnalyzerService } from './page-analyzer.service';
+import { TaskPlannerService, TaskPlan } from './task-planner.service';
 import { AgentLoggerService, LogEvent } from '../logger/agent-logger.service';
-import { ConfigService } from 'src/config/config.service';
+import { ModelFactoryService } from '../model/model-factory.service';
+import { safeJsonParse } from '../utils/input-sanitizer';
 
 export interface BrowserTaskResult {
   success: boolean;
@@ -36,6 +36,10 @@ export interface BrowserTaskResult {
   stepsCompleted: number;
   totalSteps: number;
 }
+
+// Safety limits to prevent infinite loops
+const MAX_STEP_EXECUTIONS = 50; // Maximum total step executions (including retries)
+const MAX_PLAN_STEPS = 20; // Maximum steps allowed in a plan
 
 interface BrowserAgentState {
   messages: BaseMessage[];
@@ -50,6 +54,7 @@ interface BrowserAgentState {
   status: 'planning' | 'executing' | 'verifying' | 'replanning' | 'completed' | 'failed';
   retryCount: number;
   maxRetries: number;
+  totalExecutions: number; // Track total step executions to prevent infinite loops
 }
 
 @Injectable()
@@ -61,9 +66,8 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly browserTools: BrowserToolsService,
     private readonly taskPlanner: TaskPlannerService,
-    private readonly pageAnalyzer: PageAnalyzerService,
     private readonly agentLogger: AgentLoggerService,
-    private readonly configService: ConfigService,
+    private readonly modelFactory: ModelFactoryService,
   ) { }
 
   async onModuleInit() {
@@ -80,14 +84,8 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    this.model = new ChatOpenAI({
-      model: this.configService.getConfig().model,
-      temperature: 0,
-      configuration: {
-        baseURL: 'https://openrouter.ai/api/v1',
-        apiKey: process.env.OPENROUTER_API_KEY,
-      },
-    });
+    // Use ModelFactory for centralized model management
+    this.model = this.modelFactory.getModel('main');
 
     this.isInitialized = true;
     this.logger.log('Browser agent service initialized');
@@ -128,6 +126,7 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
         status: 'planning',
         retryCount: 0,
         maxRetries: 3,
+        totalExecutions: 0,
       };
 
       const result = await agent.invoke(initialState);
@@ -201,6 +200,7 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
       status: new ReducedValue(z.string(), { reducer: (_, y) => y }),
       retryCount: new ReducedValue(z.number(), { reducer: (_, y) => y }),
       maxRetries: new ReducedValue(z.number(), { reducer: (_, y) => y }),
+      totalExecutions: new ReducedValue(z.number(), { reducer: (_, y) => y }),
     });
 
     // Planning node
@@ -209,6 +209,18 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
 
       try {
         const plan = await taskPlanner.planTask(state.task, undefined, state.chatId || undefined);
+
+        // Enforce maximum plan steps to prevent overly complex plans
+        if (plan.steps.length > MAX_PLAN_STEPS) {
+          logger.warn(`Plan has ${plan.steps.length} steps, truncating to ${MAX_PLAN_STEPS}`);
+          plan.steps = plan.steps.slice(0, MAX_PLAN_STEPS);
+          plan.steps.push({
+            stepNumber: MAX_PLAN_STEPS + 1,
+            action: 'complete',
+            description: 'Task truncated due to complexity limit',
+          });
+        }
+
         logger.log(`Created plan with ${plan.steps.length} steps`);
 
         return {
@@ -316,7 +328,7 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
           let pageSnapshot = '';
           try {
             const snapshotResult = await tools.browserSnapshot.invoke({});
-            const snapshotData = JSON.parse(snapshotResult);
+            const snapshotData = safeJsonParse(snapshotResult, { success: false, snapshot: '' });
             if (snapshotData.success) {
               pageSnapshot = snapshotData.snapshot;
             }
@@ -342,7 +354,7 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
         }
 
         const result = await toolFn.invoke(actionDecision.params);
-        const resultData = JSON.parse(result);
+        const resultData = safeJsonParse<Record<string, any>>(result, { success: false, error: 'Invalid JSON response' });
 
         // Update state based on result
         const newCompletedSteps = [...completedSteps, `${step.description}: ${resultData.message || 'completed'}`];
@@ -392,6 +404,7 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
           screenshots: newScreenshots,
           status: 'verifying',
           retryCount: 0,
+          totalExecutions: (state.totalExecutions || 0) + 1,
           messages: [new AIMessage(`Step ${step.stepNumber} completed: ${resultData.message}`)],
         };
 
@@ -402,18 +415,37 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
         return {
           error: errorMsg,
           status: 'verifying',
+          totalExecutions: (state.totalExecutions || 0) + 1,
           messages: [new AIMessage(`Step ${step.stepNumber} failed: ${errorMsg}`)],
         };
       }
     };
 
-    // Verification node
+    // Verification node with retry logic and safety limits
     const verifyNode: GraphNode<typeof BrowserState> = async (state) => {
-      const { plan, currentStepIndex, error } = state;
+      const { plan, currentStepIndex, error, retryCount, maxRetries, totalExecutions } = state;
 
-      // If there was an error, fail immediately - no retries or replanning
+      // Safety check: prevent infinite loops by limiting total executions
+      if ((totalExecutions || 0) >= MAX_STEP_EXECUTIONS) {
+        logger.error(`Task exceeded maximum executions (${MAX_STEP_EXECUTIONS}), terminating`);
+        return {
+          status: 'failed',
+          error: `Task exceeded maximum execution limit (${MAX_STEP_EXECUTIONS} steps)`,
+        };
+      }
+
+      // If there was an error, check if we should retry
       if (error) {
-        logger.error(`Task failed: ${error}`);
+        if (retryCount < maxRetries) {
+          logger.warn(`Step failed, retrying (${retryCount + 1}/${maxRetries}): ${error}`);
+          return {
+            status: 'executing',
+            retryCount: retryCount + 1,
+            error: null, // Clear error for retry
+          };
+        }
+        // Max retries exceeded, fail
+        logger.error(`Task failed after ${retryCount} retries: ${error}`);
         return { status: 'failed' };
       }
 
