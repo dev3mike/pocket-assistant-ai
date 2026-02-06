@@ -23,6 +23,8 @@ interface PendingMessage {
   caption?: string;
   timestamp: Date;
   retrieved: boolean;
+  version: number; // For message updates (edit in place)
+  updatedAt?: Date;
 }
 
 @Injectable()
@@ -67,6 +69,7 @@ export class ApiMessagingService implements IMessagingService {
       text,
       timestamp: new Date(),
       retrieved: false,
+      version: 1,
     };
 
     this.addPendingMessage(recipientId, message);
@@ -92,6 +95,7 @@ export class ApiMessagingService implements IMessagingService {
       caption,
       timestamp: new Date(),
       retrieved: false,
+      version: 1,
     };
 
     this.addPendingMessage(recipientId, message);
@@ -114,6 +118,7 @@ export class ApiMessagingService implements IMessagingService {
       caption,
       timestamp: new Date(),
       retrieved: false,
+      version: 1,
     };
 
     this.addPendingMessage(recipientId, message);
@@ -140,6 +145,41 @@ export class ApiMessagingService implements IMessagingService {
   async sendTypingIndicator(recipientId: string): Promise<void> {
     // For WebSocket implementation, emit a 'typing' event
     this.logger.debug(`Typing indicator for ${recipientId} (no-op for API)`);
+  }
+
+  /**
+   * Update an existing message (for progress streaming)
+   */
+  async updateMessage(
+    recipientId: string,
+    messageId: string,
+    text: string,
+    options?: MessageOptions,
+  ): Promise<MessageSendResult> {
+    const messages = this.pendingMessages.get(recipientId) || [];
+    const message = messages.find((m) => m.id === messageId);
+
+    if (message && message.type === 'text') {
+      message.text = text;
+      message.version += 1;
+      message.updatedAt = new Date();
+      message.retrieved = false; // Mark as not retrieved so client sees update
+
+      this.logger.debug(`Updated message ${messageId} for ${recipientId} (v${message.version})`);
+
+      // Optionally notify via webhook
+      await this.notifyWebhook(recipientId, message);
+
+      return { success: true, messageId };
+    }
+
+    // Message not found or not a text message - send new
+    this.logger.debug(`Message ${messageId} not found, sending new message`);
+    return this.sendMessage(recipientId, text, options);
+  }
+
+  supportsMessageUpdate(): boolean {
+    return true; // Via polling with version checking
   }
 
   /**

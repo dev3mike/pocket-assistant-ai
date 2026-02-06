@@ -2,6 +2,8 @@
  * MESSAGING INTERFACE – Abstraction layer for message delivery.
  * Allows different messaging backends (Telegram, REST API, WebSocket, etc.)
  * to be used interchangeably by the agent and scheduler services.
+ *
+ * Supports message updates for progressive response streaming.
  */
 
 /**
@@ -19,6 +21,22 @@ export interface MessageSendResult {
 export interface MessageOptions {
   parseMode?: 'markdown' | 'html' | 'plain';
   replyToMessageId?: string;
+}
+
+/**
+ * Progress update types for streaming responses
+ */
+export type ProgressType = 'thinking' | 'tool_start' | 'tool_progress' | 'tool_complete' | 'error';
+
+/**
+ * Progress update event emitted during agent processing
+ */
+export interface ProgressUpdate {
+  type: ProgressType;
+  message: string;
+  toolName?: string;
+  progress?: number; // 0-100 for progress bars
+  timestamp: Date;
 }
 
 /**
@@ -63,6 +81,26 @@ export interface IMessagingService {
    * @param recipientId - The recipient identifier
    */
   sendTypingIndicator?(recipientId: string): Promise<void>;
+
+  /**
+   * Update an existing message (edit in place)
+   * Returns the same messageId on success, or new messageId if update not supported
+   * @param recipientId - The recipient identifier
+   * @param messageId - The ID of the message to update
+   * @param text - The new message text
+   * @param options - Optional message options
+   */
+  updateMessage?(
+    recipientId: string,
+    messageId: string,
+    text: string,
+    options?: MessageOptions,
+  ): Promise<MessageSendResult>;
+
+  /**
+   * Check if this channel supports message updates
+   */
+  supportsMessageUpdate?(): boolean;
 
   /**
    * Get the channel type identifier

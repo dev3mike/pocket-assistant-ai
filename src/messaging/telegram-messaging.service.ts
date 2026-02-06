@@ -100,6 +100,38 @@ export class TelegramMessagingService implements IMessagingService {
     }
   }
 
+  async updateMessage(
+    recipientId: string,
+    messageId: string,
+    text: string,
+    options?: MessageOptions,
+  ): Promise<MessageSendResult> {
+    try {
+      const success = await this.telegramService.editMessage(
+        recipientId,
+        parseInt(messageId, 10),
+        text,
+      );
+
+      if (success) {
+        return { success: true, messageId };
+      }
+
+      // Fallback: send new message if edit fails
+      this.logger.debug(`Edit failed, sending new message to ${recipientId}`);
+      return this.sendMessage(recipientId, text, options);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to update message in ${recipientId}: ${errorMsg}`);
+      // Fallback: send new message
+      return this.sendMessage(recipientId, text, options);
+    }
+  }
+
+  supportsMessageUpdate(): boolean {
+    return true;
+  }
+
   getChannelType(): string {
     return 'telegram';
   }

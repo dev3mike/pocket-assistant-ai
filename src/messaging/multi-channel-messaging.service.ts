@@ -104,6 +104,28 @@ export class MultiChannelMessagingService implements IMessagingService {
     }
   }
 
+  async updateMessage(
+    recipientId: string,
+    messageId: string,
+    text: string,
+    options?: MessageOptions,
+  ): Promise<MessageSendResult> {
+    const channel = this.getChannel(recipientId);
+    const normalizedId = this.normalizeRecipientId(recipientId);
+
+    if (channel.updateMessage) {
+      return channel.updateMessage(normalizedId, messageId, text, options);
+    }
+
+    // Fallback to sending new message
+    return channel.sendMessage(normalizedId, text, options);
+  }
+
+  supportsMessageUpdate(): boolean {
+    // Both channels support message updates
+    return true;
+  }
+
   /**
    * Broadcast a message to multiple channels
    */
