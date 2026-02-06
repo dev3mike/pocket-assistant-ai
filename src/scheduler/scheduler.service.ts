@@ -9,7 +9,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, forwardRef } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
-import { TelegramService } from '../telegram/telegram.service';
+import { IMessagingService, MESSAGING_SERVICE } from '../messaging/messaging.interface';
 import { AgentService } from '../agent/agent.service';
 
 export interface ScheduledJob {
@@ -51,8 +51,8 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   private readonly CLEANUP_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
   constructor(
-    @Inject(forwardRef(() => TelegramService))
-    private readonly telegramService: TelegramService,
+    @Inject(MESSAGING_SERVICE)
+    private readonly messagingService: IMessagingService,
     @Inject(forwardRef(() => AgentService))
     private readonly agentService: AgentService,
   ) {
@@ -354,41 +354,33 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Executing job ${job.id}: ${job.description}`);
 
     try {
-      // Build the task prompt for the agent
       const taskPrompt = this.buildTaskPrompt(job);
 
-      // Use the full agent to process the task (with all tools available)
+      // Use the full agent to process the task (with all tools available, including executeCoderTask)
       const { text, screenshots } = await this.agentService.processMessage(job.chatId, taskPrompt);
 
-      // Send the agent response to the user
-      const success = await this.telegramService.sendMessage(job.chatId, text);
+      const result = await this.messagingService.sendMessage(job.chatId, text);
 
-      // Send any screenshots from browser tasks
       if (screenshots.length > 0) {
-        await this.telegramService.sendPhotos(job.chatId, screenshots, '📸 Screenshot');
+        await this.messagingService.sendPhotos(job.chatId, screenshots, '📸 Screenshot');
       }
 
-      if (success) {
-        // Update job state
+      if (result.success) {
         job.executionCount++;
         job.lastExecutedAt = new Date().toISOString();
-
-        // Check if job should be marked as completed
         if (job.scheduleType === 'once') {
           job.status = 'completed';
         } else if (job.maxExecutions && job.executionCount >= job.maxExecutions) {
           job.status = 'completed';
         }
-
         this.saveJobs();
         this.logger.log(`Job ${job.id} executed successfully (count: ${job.executionCount})`);
       } else {
-        this.logger.error(`Failed to send message for job ${job.id}`);
+        this.logger.error(`Failed to send message for job ${job.id}: ${result.error}`);
       }
     } catch (error) {
       this.logger.error(`Error executing job ${job.id}: ${error}`);
-      // Try to send a fallback message
-      await this.telegramService.sendMessage(job.chatId, `⏰ *Reminder*: ${job.description}`);
+      await this.messagingService.sendMessage(job.chatId, `⏰ *Reminder*: ${job.description}`);
     }
   }
 

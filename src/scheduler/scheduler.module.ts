@@ -1,10 +1,10 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { SchedulerService } from './scheduler.service';
-import { TelegramModule } from '../telegram/telegram.module';
 import { AgentModule } from '../agent/agent.module';
 
 @Module({
-  imports: [forwardRef(() => TelegramModule), forwardRef(() => AgentModule)],
+  // MessagingModule is @Global, so MESSAGING_SERVICE is available without explicit import
+  imports: [forwardRef(() => AgentModule)],
   providers: [SchedulerService],
   exports: [SchedulerService],
 })
