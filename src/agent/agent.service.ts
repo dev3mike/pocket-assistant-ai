@@ -31,7 +31,8 @@ import { MemoryService } from '../memory/memory.service';
 import { UsageService } from '../usage/usage.service';
 import { ModelFactoryService } from '../model/model-factory.service';
 import { PromptService } from '../prompts/prompt.service';
-import { sanitize, stripReActThinking } from '../utils/input-sanitizer';
+import { ProgressUpdate } from '../messaging/messaging.interface';
+import { sanitize } from '../utils/input-sanitizer';
 
 
 @Injectable()
@@ -144,18 +145,25 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Build the system prompt with soul context for a specific user
+   * Build the system prompt with soul context for a specific user.
+   * Injects current date/time so the agent always has it without a separate tool.
    */
   private buildSystemPrompt(chatId: string): string {
     const soulContext = this.soulService.getSoulContext(chatId);
-    // Use PromptService for centralized prompt management with hot-reload
-    return this.promptService.buildMainAgentPrompt(soulContext || undefined);
+    const base = this.promptService.buildMainAgentPrompt(soulContext || undefined);
+    const currentDateTime = new Date().toISOString();
+    return `${base}\n\n**Current date and time (ISO):** ${currentDateTime}`;
   }
 
   /**
    * Build and run the agent for a specific conversation
    */
-  private buildAgent(chatId: string, traceId: string, rootSpanId: string) {
+  private buildAgent(
+    chatId: string,
+    traceId: string,
+    rootSpanId: string,
+    onProgress?: (update: ProgressUpdate) => void,
+  ) {
     // Get tools specific to this chat
     const toolsByName = this.getToolsForChat(chatId);
     const tools = Object.values(toolsByName);
@@ -167,14 +175,12 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     const traceService = this.traceService;
     const usageService = this.usageService;
     const systemPrompt = this.buildSystemPrompt(chatId);
+    const modelName = this.modelFactory.getModelNameForType('main');
 
     const MessagesState = new StateSchema({
       messages: MessagesValue,
       traceId: new ReducedValue(z.string(), { reducer: (_, y) => y }),
       rootSpanId: new ReducedValue(z.string(), { reducer: (_, y) => y }),
-      thoughts: new ReducedValue(z.array(z.string()).default([]), {
-        reducer: (x, y) => [...x, ...y],
-      }),
       llmCalls: new ReducedValue(z.number().default(0), {
         reducer: (x, y) => x + y,
       }),
@@ -196,27 +202,40 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
         data: { traceId: state.traceId.slice(0, 8) },
       });
 
-      const response = await modelWithTools.invoke([new SystemMessage(systemPrompt), ...state.messages]);
+      // Emit thinking progress (for subsequent calls after the first)
+      if (state.llmCalls > 0) {
+        onProgress?.({ type: 'thinking', message: 'Thinking...', timestamp: new Date() });
+      }
+
+      // Prepare messages for LLM call
+      const llmInput = [new SystemMessage(systemPrompt), ...state.messages];
+      const response = await modelWithTools.invoke(llmInput);
 
       // Extract token usage from response using helper
       let inTokens = 0;
       let outTokens = 0;
-      const thoughts: string[] = [];
 
       if (AIMessage.isInstance(response)) {
         const usage = usageService.extractUsageFromResponse(response);
         inTokens = usage.inputTokens;
         outTokens = usage.outputTokens;
 
-        // Extract ReAct thoughts from response content (look for **Thought:** pattern)
-        const content = String(response.content);
-        const thoughtMatches = content.match(/\*\*Thought:\*\*\s*([^\n*]+)/gi);
-        if (thoughtMatches) {
-          for (const match of thoughtMatches) {
-            const thought = match.replace(/\*\*Thought:\*\*/i, '').trim();
-            if (thought) thoughts.push(thought);
-          }
-        }
+        // Record LLM generation in Langfuse for proper observability
+        traceService.recordGeneration(state.traceId, {
+          name: `llm_call_${state.llmCalls + 1}`,
+          model: modelName,
+          input: llmInput.map((m) => ({ role: m._getType(), content: m.content })),
+          output: { role: 'assistant', content: response.content, tool_calls: response.tool_calls },
+          usage: {
+            promptTokens: inTokens,
+            completionTokens: outTokens,
+            totalTokens: inTokens + outTokens,
+          },
+          metadata: {
+            callNumber: state.llmCalls + 1,
+            hasToolCalls: !!response.tool_calls?.length,
+          },
+        });
       }
 
       if (AIMessage.isInstance(response)) {
@@ -229,7 +248,6 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
               data: {
                 traceId: state.traceId.slice(0, 8),
                 toolCalls: response.tool_calls.map((tc) => ({ name: tc.name, args: tc.args })),
-                thoughts,
               },
             },
           );
@@ -239,17 +257,15 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
             data: {
               traceId: state.traceId.slice(0, 8),
               contentPreview: String(response.content).slice(0, 100),
-              thoughts,
             },
           });
         }
       }
 
-      traceService.endSpan(spanId, { inputTokens: inTokens, outputTokens: outTokens, thoughts });
+      traceService.endSpan(spanId, { inputTokens: inTokens, outputTokens: outTokens });
 
       return {
         messages: [response],
-        thoughts,
         llmCalls: 1,
         inputTokens: inTokens,
         outputTokens: outTokens,
@@ -276,11 +292,25 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
           data: { traceId: state.traceId.slice(0, 8), args: toolCall.args },
         });
 
+        // Emit tool start progress
+        onProgress?.({
+          type: 'tool_start',
+          message: `Using ${toolCall.name}...`,
+          toolName: toolCall.name,
+          timestamp: new Date(),
+        });
+
         const selectedTool = toolsByName[toolCall.name];
 
         if (!selectedTool) {
           agentLogger.error(LogEvent.TOOL_ERROR, `Tool not found: ${toolCall.name}`, { chatId });
           traceService.endSpanWithError(toolSpanId, `Tool not found: ${toolCall.name}`);
+          onProgress?.({
+            type: 'error',
+            message: `Tool "${toolCall.name}" not found`,
+            toolName: toolCall.name,
+            timestamp: new Date(),
+          });
           results.push(
             new ToolMessage({
               tool_call_id: toolCall.id!,
@@ -297,6 +327,15 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
             data: { traceId: state.traceId.slice(0, 8), result: String(observation).slice(0, 200) },
           });
           traceService.endSpan(toolSpanId, { resultPreview: String(observation).slice(0, 200) });
+
+          // Emit tool complete progress
+          onProgress?.({
+            type: 'tool_complete',
+            message: `${toolCall.name} completed`,
+            toolName: toolCall.name,
+            timestamp: new Date(),
+          });
+
           results.push(observation);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
@@ -304,6 +343,15 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
             chatId,
           });
           traceService.endSpanWithError(toolSpanId, errorMessage);
+
+          // Emit tool error progress
+          onProgress?.({
+            type: 'error',
+            message: `${toolCall.name} failed`,
+            toolName: toolCall.name,
+            timestamp: new Date(),
+          });
+
           results.push(
             new ToolMessage({
               tool_call_id: toolCall.id!,
@@ -342,16 +390,23 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
       .compile();
   }
 
-  async processMessage(chatId: string, userMessage: string): Promise<{ text: string; screenshots: string[] }> {
+  async processMessage(
+    chatId: string,
+    userMessage: string,
+    onProgress?: (update: ProgressUpdate) => void,
+  ): Promise<{ text: string; screenshots: string[] }> {
     if (!this.isInitialized) {
       return { text: 'Sorry, the AI assistant is still initializing. Please try again in a moment.', screenshots: [] };
     }
 
-    // Start a new trace for this request
-    const trace = this.traceService.startTrace(chatId);
+    // Emit initial thinking progress
+    onProgress?.({ type: 'thinking', message: 'Thinking...', timestamp: new Date() });
 
     // Sanitize user input to protect against prompt injection
     const sanitizedMessage = sanitize(userMessage, 4000);
+
+    // Start a new trace for this request with the user message as input
+    const trace = this.traceService.startTrace(chatId, undefined, { userMessage: sanitizedMessage });
 
     this.agentLogger.info(LogEvent.MESSAGE_RECEIVED, `Received message`, {
       chatId,
@@ -365,27 +420,21 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     // Add the new user message (sanitized)
     messages.push(new HumanMessage(sanitizedMessage));
 
-    // Save user message to memory (original for display purposes)
-    await this.memoryService.addMessage(chatId, 'user', userMessage);
+    // Save sanitized user message to memory (prevent prompt injection in stored memory)
+    await this.memoryService.addMessage(chatId, 'user', sanitizedMessage);
 
     try {
       // Build agent with user-specific tools and system prompt
-      const agent = this.buildAgent(chatId, trace.traceId, trace.rootSpanId);
+      const agent = this.buildAgent(chatId, trace.traceId, trace.rootSpanId, onProgress);
 
       const result = await agent.invoke({
         messages: messages,
         traceId: trace.traceId,
         rootSpanId: trace.rootSpanId,
-        thoughts: [],
       });
 
       const finalContent = result.messages.at(-1)?.content;
-      const rawText = typeof finalContent === 'string' ? finalContent : JSON.stringify(finalContent);
-
-      // Strip ReAct thinking patterns from the response (keep clean text for user)
-      // Thoughts are kept for debugging in trace logs
-      const { cleanedResponse, thoughts: extractedThoughts } = stripReActThinking(rawText);
-      const text = cleanedResponse || rawText; // Fallback to raw if stripping removes everything
+      const text = typeof finalContent === 'string' ? finalContent : JSON.stringify(finalContent);
 
       // Collect screenshot paths from tool message artifacts (executeBrowserTask returns content_and_artifact)
       const screenshots: string[] = [];
@@ -404,19 +453,14 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
         this.agentLogger.debug(LogEvent.LLM_RESPONSE, `Token usage: ${inputTokens} in, ${outputTokens} out`, { chatId });
       }
 
-      // Save assistant response to memory (cleaned text for user context)
+      // Save assistant response to memory
       await this.memoryService.addMessage(chatId, 'assistant', text);
 
-      // Combine extracted thoughts from response with those from state
-      const allThoughts = [...(result.thoughts || []), ...extractedThoughts];
-
-      // End the trace and log summary (include thoughts for debugging)
+      // End the trace and log summary
       this.traceService.endSpan(trace.rootSpanId, {
         inputTokens,
         outputTokens,
         llmCalls: result.llmCalls,
-        thoughtCount: allThoughts.length,
-        thoughts: allThoughts.length > 0 ? allThoughts : undefined,
       });
 
       const traceSummary = this.traceService.getTraceSummary(trace.traceId);
@@ -426,9 +470,18 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
           traceId: trace.traceId.slice(0, 8),
           totalDurationMs: traceSummary?.totalDurationMs,
           spanCount: traceSummary?.spanCount,
-          thoughts: allThoughts.length > 0 ? allThoughts : undefined,
         },
       });
+
+      // Update trace output and end trace (flush to Langfuse)
+      this.traceService.updateTraceOutput(trace.traceId, {
+        response: text,
+        screenshots: screenshots.length,
+        llmCalls: result.llmCalls,
+        inputTokens,
+        outputTokens,
+      });
+      this.traceService.endTrace(trace.traceId);
 
       return { text, screenshots };
     } catch (error) {
@@ -438,6 +491,8 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
         chatId,
         data: { traceId: trace.traceId.slice(0, 8) },
       });
+      // End trace even on error to flush what we have
+      this.traceService.endTrace(trace.traceId);
       return { text: `Sorry, I encountered an error: ${errorMessage}`, screenshots: [] };
     }
   }
@@ -459,8 +514,8 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  clearConversation(chatId: string): void {
-    this.memoryService.resetMemory(chatId);
+  async clearConversation(chatId: string): Promise<void> {
+    await this.memoryService.resetMemory(chatId);
     this.agentLogger.info(LogEvent.CONVERSATION_CLEARED, 'Conversation cleared', { chatId });
   }
 

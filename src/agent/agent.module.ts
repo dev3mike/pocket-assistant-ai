@@ -7,6 +7,7 @@ import { BrowserModule } from '../browser/browser.module';
 import { MemoryModule } from '../memory/memory.module';
 import { UsageModule } from '../usage/usage.module';
 import { CoderModule } from '../coder/coder.module';
+import { StateModule } from '../state/state.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { CoderModule } from '../coder/coder.module';
     MemoryModule,
     UsageModule,
     forwardRef(() => CoderModule),
+    StateModule,
   ],
   providers: [AgentService, ToolsService],
   exports: [AgentService],

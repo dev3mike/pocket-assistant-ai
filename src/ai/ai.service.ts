@@ -332,37 +332,4 @@ Return a JSON object with these refined fields:
       return fallback;
     }
   }
-
-  /**
-   * Classify whether a message is a coding-related task (clone repo, edit files, git, PR review, etc.).
-   * Used by CoderRouterService so routing can be LLM-based instead of keyword heuristic.
-   */
-  async isCodingTask(message: string, chatId?: string): Promise<boolean> {
-    const trimmed = message?.trim();
-    if (!trimmed) return false;
-    try {
-      const response = await this.model.invoke([
-        new SystemMessage(
-          `You are a classifier. Your only job is to decide if the user message is a CODING-RELATED TASK.
-
-Coding-related means: cloning a git repo, viewing/editing/writing files or code, git operations (commit, push, pull, status), running commands or scripts in a project, reviewing code or a GitHub PR, creating or modifying code files, working with a codebase or repository.
-
-NOT coding-related: general chat, reminders, scheduling, browsing websites (unless to get code), profile updates, asking about the weather, etc.
-
-Reply with exactly one word: YES or NO.`,
-        ),
-        new HumanMessage(trimmed.slice(0, 2000)),
-      ]);
-      if (AIMessage.isInstance(response)) {
-        this.usageService.recordUsageFromResponse(chatId, response);
-      }
-      const text = (typeof response.content === 'string' ? response.content : String(response.content))
-        .trim()
-        .toUpperCase();
-      return text.startsWith('YES');
-    } catch (error) {
-      this.logger.warn(`isCodingTask classification failed: ${error}`);
-      return false;
-    }
-  }
 }

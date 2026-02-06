@@ -1,11 +1,14 @@
 /**
- * Defines the tools the MAIN AGENT can call. Provides getCurrentDate, getProfile,
- * updateProfile, createSchedule, listSchedules, cancelSchedule, httpRequest, and executeBrowserTask.
+ * Defines the tools the MAIN AGENT can call. Provides getProfile,
+ * updateProfile, createSchedule, listSchedules, cancelSchedule, httpRequest, executeBrowserTask,
+ * memorySearch, memorySave, and state management tools (getState, setState, deleteState, listState).
  * When the main agent calls executeBrowserTask(task), this service invokes the
  * Browser Agent (BrowserAgentService) and returns summary + screenshots as a
  * content_and_artifact ToolMessage. When the main agent calls executeCoderTask(task),
  * this service starts the Coder Agent in the background and returns immediately;
  * progress is sent to the user via Telegram. httpRequest performs curl-like HTTP calls.
+ * memorySearch and memorySave provide access to the two-layer memory system.
+ * State tools provide key-value storage for runtime data (e.g., previous values for comparisons).
  * Does not run any agent loop itself.
  */
 import { Injectable, Logger } from '@nestjs/common';
@@ -17,6 +20,9 @@ import { AiService } from '../ai/ai.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
 import { BrowserAgentService } from '../browser/browser-agent.service';
 import { CoderAgentService } from '../coder/coder-agent.service';
+import { MemoryService } from '../memory/memory.service';
+import { StateService } from '../state/state.service';
+import { MemoryCategory } from '../memory/memory.types';
 import { validateUrlForSsrf } from '../utils/input-sanitizer';
 import * as z from 'zod';
 
@@ -32,6 +38,8 @@ export class ToolsService {
     private readonly schedulerService: SchedulerService,
     private readonly browserAgentService: BrowserAgentService,
     private readonly coderAgentService: CoderAgentService,
+    private readonly memoryService: MemoryService,
+    private readonly stateService: StateService,
   ) { }
 
   /**
@@ -39,7 +47,6 @@ export class ToolsService {
    */
   getLocalTools(): Record<string, any> {
     return {
-      getCurrentDate: this.createGetCurrentDateTool(),
       setLogging: this.createSetLoggingTool(),
     };
   }
@@ -54,28 +61,23 @@ export class ToolsService {
       updateProfile: this.createUpdateProfileTool(chatId),
       createSchedule: this.createScheduleTool(chatId),
       listSchedules: this.createListSchedulesTool(chatId),
+      listInactiveSchedules: this.createListInactiveSchedulesTool(chatId),
       cancelSchedule: this.createCancelScheduleTool(chatId),
+      reactivateSchedule: this.createReactivateScheduleTool(chatId),
       executeBrowserTask: this.createExecuteBrowserTaskTool(chatId),
       executeCoderTask: this.createExecuteCoderTaskTool(chatId),
       httpRequest: this.createHttpRequestTool(chatId),
+      memorySearch: this.createMemorySearchTool(chatId),
+      memorySave: this.createMemorySaveTool(chatId),
+      // State management tools for runtime key-value storage
+      getState: this.createGetStateTool(chatId),
+      setState: this.createSetStateTool(chatId),
+      deleteState: this.createDeleteStateTool(chatId),
+      listState: this.createListStateTool(chatId),
     };
   }
 
   // ===== Basic Tools =====
-
-  private createGetCurrentDateTool() {
-    return tool(
-      () => {
-        const date = new Date().toISOString();
-        this.agentLogger.info(LogEvent.TOOL_RESULT, `getCurrentDate: ${date}`);
-        return date;
-      },
-      {
-        name: 'getCurrentDate',
-        description: 'Get the current date and time in ISO format',
-      },
-    );
-  }
 
   private createSetLoggingTool() {
     return tool(
@@ -210,14 +212,20 @@ export class ToolsService {
       {
         name: 'updateProfile',
         description:
-          'Update user profile settings. Can update AI name, AI personality, signature emoji, user name, user description, or additional context. Use this when the user wants to change any profile settings.',
+          `Update user profile settings. Can update AI name, AI personality, signature emoji, user name, user description, or additional context.
+
+IMPORTANT: additionalContext is for STATIC preferences and background info ONLY (e.g., "prefers formal tone", "works in tech").
+DO NOT use additionalContext for:
+- Schedule/task status (use createSchedule/listSchedules)
+- Runtime state like "last BTC price" (use setState)
+- Anything that changes frequently or should expire`,
         schema: z.object({
           aiName: z.string().optional().describe('New name for the AI assistant'),
           aiPersonality: z.string().optional().describe('New personality/style for the AI (e.g., "friendly", "professional", "concise")'),
           aiEmoji: z.string().optional().describe('New signature emoji for the AI (e.g., "🚀", "🌟", "🤖")'),
           userName: z.string().optional().describe("The user's name"),
           userDescription: z.string().optional().describe('Description about the user'),
-          additionalContext: z.string().optional().describe('Additional context or preferences for the AI to remember'),
+          additionalContext: z.string().optional().describe('Static preferences or background info ONLY. NOT for schedules, tasks, or runtime state.'),
         }),
       },
     );
@@ -305,23 +313,42 @@ export class ToolsService {
       },
       {
         name: 'createSchedule',
-        description: `Schedule a reminder or task for the user. Use this when the user wants to be reminded about something or schedule a recurring task.
+        description: `Schedule a reminder or task for the user. ONLY use this tool when the user EXPLICITLY requests to create a schedule/reminder/task.
 
-**IMPORTANT - Ask for details when context is incomplete:**
-Before creating a schedule, you MUST have enough context to know EXACTLY what to do when the task runs.
-If the user's request is vague or lacks specific details, DO NOT create the schedule. Instead, ask clarifying questions first.
+**CRITICAL - EXPLICIT REQUEST REQUIRED:**
+The user MUST explicitly ask you to create a schedule using words like:
+- "remind me", "set a reminder", "create a reminder"
+- "schedule", "create a schedule", "set up a task"
+- "notify me", "alert me", "let me know at [time]"
+- "every [day/morning/week]", "at [time] do X"
 
-Examples of INCOMPLETE requests (DO NOT schedule these - ask for details):
-- "Schedule a morning brief" → Ask: What should the morning brief include? (news, weather, calendar, tasks, etc.)
-- "Remind me about exercise" → Ask: What kind of reminder? (start workout, take a break, drink water?)
-- "Send me updates daily" → Ask: Updates about what? (weather, stocks, news topics?)
-- "Schedule a weekly report" → Ask: What should be in the report?
+**DO NOT create schedules when:**
+- User is just asking a question (e.g., "what's the bitcoin price?" does NOT mean "schedule bitcoin price checks")
+- User is having a conversation about a topic (talking about weather ≠ scheduling weather updates)
+- The context from previous messages seems related but user didn't ask for a schedule
+- You're guessing or inferring that user might want a schedule
 
-Examples of COMPLETE requests (OK to schedule):
-- "Send me a Persian poem every morning at 8am"
-- "Remind me to call mom every Sunday at 5pm"
-- "Every day at 9am, tell me the weather in Gothenburg and my calendar events"
-- "Every Friday at 6pm, remind me: weekend shopping list"
+**IMPORTANT - Don't guess the task content:**
+The task description and context must come DIRECTLY from what the user said. Do NOT:
+- Assume the task is about the previous conversation topic
+- Fill in details the user didn't provide
+- Infer what the user "probably" wants based on recent questions
+
+**Ask for clarification when details are missing:**
+If the user asks for a schedule but doesn't provide enough detail, ask them:
+- What should the reminder/task be about?
+- What time/frequency?
+- What specific action should be performed?
+
+Examples of VALID schedule requests:
+- "Remind me to call mom every Sunday at 5pm" → OK: explicit request with clear task
+- "Every morning at 8am, send me a Persian poem" → OK: explicit schedule request
+- "Set a reminder for tomorrow at 9am to check the meeting agenda" → OK: explicit
+
+Examples of INVALID (do NOT schedule):
+- User asks "what's bitcoin price?" then later "can you check that regularly?" → Ask: "Do you want me to schedule regular bitcoin price checks? If so, how often?"
+- User discusses weather, then says "that would be useful to know" → Ask: "Would you like me to schedule weather updates? What time and how often?"
+- User says "morning updates would be nice" → Ask: "What would you like included in the morning updates, and what time?"
 
 For ONE-TIME tasks: Use executeAt with an ISO date string (e.g., "2024-12-25T09:00:00").
 For RECURRING tasks: Use cronExpression with a cron format "minute hour dayOfMonth month dayOfWeek":
@@ -392,9 +419,103 @@ Use maxExecutions to limit how many times a recurring task runs (e.g., 10 for "r
       },
       {
         name: 'cancelSchedule',
-        description: 'Cancel an active scheduled task or reminder. Use this when the user wants to remove a scheduled item.',
+        description: `Cancel an active scheduled task or reminder. ONLY use when the user EXPLICITLY asks to cancel/remove/delete a schedule.
+
+**EXPLICIT REQUEST REQUIRED:**
+User must say things like: "cancel", "remove", "delete", "stop", "turn off", "disable" a schedule/reminder/task.
+
+**DO NOT cancel when:**
+- User is just asking about schedules (listing them is not canceling them)
+- User expresses mild dissatisfaction (ask for confirmation first)
+- You think the schedule might not be needed anymore
+
+**ALWAYS confirm before canceling** if:
+- User's request is ambiguous (e.g., "I don't need that anymore" - ask which one)
+- Multiple schedules could match the description (list them and ask which to cancel)`,
         schema: z.object({
           jobId: z.string().describe('The ID of the schedule to cancel (get this from listSchedules)'),
+        }),
+      },
+    );
+  }
+
+  private createListInactiveSchedulesTool(chatId: string) {
+    return tool(
+      () => {
+        const jobs = this.schedulerService.getInactiveJobsForChat(chatId);
+
+        if (jobs.length === 0) {
+          return 'You have no inactive (cancelled or completed) scheduled tasks.';
+        }
+
+        const jobsList = jobs.map((job) => this.schedulerService.formatJobForDisplay(job)).join('\n\n---\n\n');
+
+        this.agentLogger.info(LogEvent.TOOL_RESULT, `Listed ${jobs.length} inactive schedules`, { chatId });
+
+        return `📋 *Your Inactive Schedules (${jobs.length}):*\n\n${jobsList}\n\n💡 Use reactivateSchedule to reactivate any of these.`;
+      },
+      {
+        name: 'listInactiveSchedules',
+        description: 'List all inactive (cancelled or completed) scheduled tasks. Use when the user asks about old/past/cancelled/completed schedules or wants to see what schedules they can reactivate.',
+      },
+    );
+  }
+
+  private createReactivateScheduleTool(chatId: string) {
+    return tool(
+      (input: { jobId: string; newExecuteAt?: string }) => {
+        const job = this.schedulerService.getJob(input.jobId);
+
+        if (!job) {
+          return `Error: Schedule with ID "${input.jobId}" not found.`;
+        }
+
+        if (job.chatId !== chatId) {
+          return `Error: You don't have permission to reactivate this schedule.`;
+        }
+
+        if (job.status === 'active') {
+          return `This schedule is already active.`;
+        }
+
+        // For one-time jobs that have passed, require a new time
+        if (job.scheduleType === 'once' && job.executeAt) {
+          const oldTime = new Date(job.executeAt);
+          if (oldTime <= new Date() && !input.newExecuteAt) {
+            return `Error: This was a one-time schedule for ${oldTime.toLocaleString()} which has already passed. Please provide a new execution time (newExecuteAt) to reactivate it.`;
+          }
+        }
+
+        const success = this.schedulerService.reactivateJob(input.jobId, chatId, input.newExecuteAt);
+
+        if (success) {
+          const updatedJob = this.schedulerService.getJob(input.jobId);
+          this.agentLogger.info(LogEvent.TOOL_RESULT, `Schedule reactivated: ${input.jobId}`, { chatId });
+
+          let response = `✅ Schedule "${job.description}" has been reactivated.`;
+          if (updatedJob?.scheduleType === 'once' && updatedJob.executeAt) {
+            response += `\nScheduled for: ${new Date(updatedJob.executeAt).toLocaleString()}`;
+          }
+          return response;
+        }
+
+        return 'Error: Failed to reactivate the schedule. For one-time schedules with past execution times, provide a new time using the newExecuteAt parameter.';
+      },
+      {
+        name: 'reactivateSchedule',
+        description: `Reactivate a cancelled or completed schedule. Use when the user wants to re-enable a previously cancelled or completed task.
+
+**EXPLICIT REQUEST REQUIRED:**
+User must explicitly ask to reactivate/re-enable/restart a schedule.
+
+**For one-time schedules:**
+If the original execution time has passed, you MUST provide a new execution time using the newExecuteAt parameter (ISO format).
+
+**For recurring schedules:**
+Can be reactivated without a new time - they will resume on their normal schedule.`,
+        schema: z.object({
+          jobId: z.string().describe('The ID of the schedule to reactivate (get this from listInactiveSchedules)'),
+          newExecuteAt: z.string().optional().describe('New execution time for one-time schedules (ISO format, e.g., "2024-12-25T09:00:00"). Required if the original time has passed.'),
         }),
       },
     );
@@ -637,5 +758,278 @@ Examples (browser explicitly requested):
         }),
       },
     );
+  }
+
+  // ===== Memory Tools =====
+
+  private createMemorySearchTool(chatId: string) {
+    return tool(
+      async (input: { query: string; maxResults?: number }) => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Memory search: ${input.query}`, { chatId });
+
+        try {
+          const results = await this.memoryService.searchMemory(chatId, input.query, {
+            maxResults: input.maxResults ?? 5,
+            minScore: 0.3,
+          });
+
+          if (results.length === 0) {
+            this.agentLogger.info(LogEvent.TOOL_RESULT, 'Memory search: no results', { chatId });
+            return 'No relevant memories found for this query.';
+          }
+
+          let response = `Found ${results.length} relevant memories:\n\n`;
+          for (let i = 0; i < results.length; i++) {
+            const result = results[i];
+            const source = result.source === 'long-term' ? '📌' : '💬';
+            response += `${i + 1}. ${source} ${result.content}\n`;
+            response += `   (Score: ${(result.score * 100).toFixed(0)}%, Source: ${result.source})\n\n`;
+          }
+
+          this.agentLogger.info(LogEvent.TOOL_RESULT, `Memory search: found ${results.length} results`, { chatId });
+          return response;
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          this.agentLogger.error(LogEvent.TOOL_ERROR, `Memory search failed: ${errorMsg}`, { chatId });
+          return `Memory search failed: ${errorMsg}`;
+        }
+      },
+      {
+        name: 'memorySearch',
+        description: `Search your memory for relevant past conversations, facts, preferences, or decisions. Use BEFORE answering questions about:
+- Past work or conversations ("what did we discuss about X?")
+- User preferences ("do I like X?", "how do I prefer X?")
+- Previous decisions ("what did we decide about X?")
+- User facts ("what's my name?", "where do I live?")
+- Pending tasks or todos
+
+This searches both recent conversation history and long-term memories.`,
+        schema: z.object({
+          query: z.string().describe('What to search for in memory (e.g. "user preferences for coffee", "decision about API design")'),
+          maxResults: z.number().optional().describe('Maximum number of results to return (default: 5)'),
+        }),
+      },
+    );
+  }
+
+  private createMemorySaveTool(chatId: string) {
+    return tool(
+      async (input: { content: string; category: string; tags?: string[] }) => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Memory save: ${input.content.slice(0, 50)}...`, { chatId });
+
+        try {
+          // Validate category
+          const validCategories: MemoryCategory[] = ['fact', 'preference', 'decision', 'context', 'todo'];
+          const category = validCategories.includes(input.category as MemoryCategory)
+            ? (input.category as MemoryCategory)
+            : 'fact';
+
+          const longTermService = this.memoryService.getLongTermMemoryService();
+          const entry = longTermService.addMemory(chatId, {
+            content: input.content,
+            category,
+            source: 'manual',
+            tags: input.tags,
+          });
+
+          this.agentLogger.info(LogEvent.TOOL_RESULT, `Memory saved: ${entry.id}`, { chatId });
+          return `✅ Saved to long-term memory:\n"${input.content}"\n\nCategory: ${category}${input.tags ? `\nTags: ${input.tags.join(', ')}` : ''}`;
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          this.agentLogger.error(LogEvent.TOOL_ERROR, `Memory save failed: ${errorMsg}`, { chatId });
+          return `Failed to save memory: ${errorMsg}`;
+        }
+      },
+      {
+        name: 'memorySave',
+        description: `Save an important fact, preference, or decision to long-term memory. Use when:
+- The user explicitly asks you to remember something ("remember that I...", "don't forget...")
+- Important personal information is shared (name, location, preferences)
+- A significant decision is made
+- The user shares ongoing context about projects or goals
+
+DO NOT use for runtime/temporary data like "last BTC price" or scheduled task state - use setState for those.
+
+Categories:
+- "fact": Factual information about the user or their world
+- "preference": User likes, dislikes, or preferences
+- "decision": A decision that was made
+- "context": Ongoing context (projects, situations)
+- "todo": Something to remember to do`,
+        schema: z.object({
+          content: z.string().describe('What to remember (e.g. "User prefers dark mode", "User is working on project X")'),
+          category: z.enum(['fact', 'preference', 'decision', 'context', 'todo']).describe('Category of the memory'),
+          tags: z.array(z.string()).optional().describe('Optional tags for easier searching (e.g. ["programming", "preference"])'),
+        }),
+      },
+    );
+  }
+
+  // ===== State Management Tools =====
+
+  private createGetStateTool(chatId: string) {
+    return tool(
+      (input: { key: string }) => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Get state: ${input.key}`, { chatId });
+
+        const entry = this.stateService.getStateEntry(chatId, input.key);
+
+        if (!entry) {
+          this.agentLogger.info(LogEvent.TOOL_RESULT, `State not found: ${input.key}`, { chatId });
+          return `No value found for key "${input.key}"`;
+        }
+
+        this.agentLogger.info(LogEvent.TOOL_RESULT, `State retrieved: ${input.key}`, { chatId });
+
+        let response = `Key: ${entry.key}\nValue: ${JSON.stringify(entry.value)}`;
+        response += `\nUpdated: ${entry.updatedAt}`;
+        if (entry.expiresAt) {
+          response += `\nExpires: ${entry.expiresAt}`;
+        }
+
+        return response;
+      },
+      {
+        name: 'getState',
+        description: `Retrieve a stored runtime value by key. Use for:
+- Getting previous values for comparison (e.g., last BTC price, last check time)
+- Retrieving temporary data stored by scheduled tasks
+- Checking if a value exists before updating it
+
+IMPORTANT: If you don't know the exact key name, call listState first to see available keys. Don't guess key names.`,
+        schema: z.object({
+          key: z.string().describe('The exact key to retrieve. Call listState first if unsure about available keys.'),
+        }),
+      },
+    );
+  }
+
+  private createSetStateTool(chatId: string) {
+    return tool(
+      (input: { key: string; value: any; ttlMinutes?: number }) => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Set state: ${input.key}`, { chatId });
+
+        try {
+          const entry = this.stateService.setState(chatId, input.key, input.value, input.ttlMinutes);
+
+          this.agentLogger.info(LogEvent.TOOL_RESULT, `State saved: ${input.key}`, { chatId });
+
+          let response = `✅ State saved:\nKey: ${entry.key}\nValue: ${JSON.stringify(entry.value)}`;
+          if (entry.expiresAt) {
+            response += `\nExpires: ${entry.expiresAt}`;
+          }
+
+          return response;
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          this.agentLogger.error(LogEvent.TOOL_ERROR, `Set state failed: ${errorMsg}`, { chatId });
+          return `Failed to save state: ${errorMsg}`;
+        }
+      },
+      {
+        name: 'setState',
+        description: `Store a runtime value with an optional expiration time. Use for:
+- Storing values between scheduled task runs (e.g., previous BTC price for comparison)
+- Temporary data that should auto-expire (use ttlMinutes)
+- Cross-session state that isn't appropriate for long-term memory
+
+DO NOT use updateProfile for this kind of data - use setState instead.`,
+        schema: z.object({
+          key: z.string().describe('The key to store under (e.g., "last_btc_price", "last_check_time")'),
+          value: z.any().describe('The value to store (can be string, number, object, array)'),
+          ttlMinutes: z.number().optional().describe('Optional time-to-live in minutes. After this time, the value auto-expires.'),
+        }),
+      },
+    );
+  }
+
+  private createDeleteStateTool(chatId: string) {
+    return tool(
+      (input: { key: string }) => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Delete state: ${input.key}`, { chatId });
+
+        const deleted = this.stateService.deleteState(chatId, input.key);
+
+        if (deleted) {
+          this.agentLogger.info(LogEvent.TOOL_RESULT, `State deleted: ${input.key}`, { chatId });
+          return `✅ State "${input.key}" has been deleted.`;
+        }
+
+        this.agentLogger.info(LogEvent.TOOL_RESULT, `State not found for deletion: ${input.key}`, { chatId });
+        return `Key "${input.key}" was not found.`;
+      },
+      {
+        name: 'deleteState',
+        description: 'Delete a stored runtime value by key.',
+        schema: z.object({
+          key: z.string().describe('The key to delete'),
+        }),
+      },
+    );
+  }
+
+  private createListStateTool(chatId: string) {
+    return tool(
+      () => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, 'List state keys', { chatId });
+
+        const entries = this.stateService.listState(chatId);
+
+        if (entries.length === 0) {
+          this.agentLogger.info(LogEvent.TOOL_RESULT, 'No state entries', { chatId });
+          return 'No stored state values.';
+        }
+
+        this.agentLogger.info(LogEvent.TOOL_RESULT, `Listed ${entries.length} state keys`, { chatId });
+
+        let response = `📋 **Stored State Keys (${entries.length}):**\n\n`;
+        for (const entry of entries) {
+          const age = this.formatAge(entry.updatedAt);
+          response += `• **${entry.key}** (updated ${age})`;
+          if (entry.expiresAt) {
+            const expiresIn = this.formatTimeUntil(entry.expiresAt);
+            response += ` - expires ${expiresIn}`;
+          }
+          response += '\n';
+        }
+
+        response += '\nUse getState(key) to retrieve a specific value.';
+
+        return response;
+      },
+      {
+        name: 'listState',
+        description: 'List all stored state keys with metadata (without values). ALWAYS call this first before getState if you need to find existing state data (e.g., previous prices, last check times). This ensures you use the correct key names.',
+      },
+    );
+  }
+
+  /**
+   * Format a timestamp as relative age (e.g., "5 min ago", "2 hours ago")
+   */
+  private formatAge(isoDate: string): string {
+    const ms = Date.now() - new Date(isoDate).getTime();
+    const minutes = Math.floor(ms / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+    const days = Math.floor(hours / 24);
+    return `${days} day${days > 1 ? 's' : ''} ago`;
+  }
+
+  /**
+   * Format time until expiration (e.g., "in 5 min", "in 2 hours")
+   */
+  private formatTimeUntil(isoDate: string): string {
+    const ms = new Date(isoDate).getTime() - Date.now();
+    if (ms < 0) return 'expired';
+    const minutes = Math.floor(ms / 60000);
+    if (minutes < 1) return 'in <1 min';
+    if (minutes < 60) return `in ${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `in ${hours} hour${hours > 1 ? 's' : ''}`;
+    const days = Math.floor(hours / 24);
+    return `in ${days} day${days > 1 ? 's' : ''}`;
   }
 }
