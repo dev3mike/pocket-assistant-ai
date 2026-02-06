@@ -24,7 +24,7 @@ export interface ChatMemory {
 export class MemoryService {
   private readonly logger = new Logger(MemoryService.name);
   private readonly dataDir: string;
-  private readonly MAX_MESSAGES = 10;
+  private readonly MAX_MESSAGES = 16;
 
   // In-memory cache of loaded memories
   private memoryCache: Map<string, ChatMemory> = new Map();
@@ -139,8 +139,8 @@ export class MemoryService {
       return;
     }
 
-    // Calculate how many messages to summarize (keep the most recent 4)
-    const keepCount = 4;
+    // Keep more recent messages so "what about now?" / "that one" have clear referents
+    const keepCount = 8;
     const messagesToSummarize = memory.messages.slice(0, memory.messages.length - keepCount);
     const recentMessages = memory.messages.slice(-keepCount);
 
