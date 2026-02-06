@@ -39,7 +39,8 @@ Unlike simple chatbots, Pocket Assistant uses a multi-agent architecture where s
 
 ### Intelligent Conversations
 - Powered by LLMs via OpenRouter (supports GPT-4, Claude, Gemini, and more)
-- Remembers conversation context with automatic memory management
+- **Two-layer memory**: short-term conversation history plus long-term semantic memory for important facts and preferences
+- Semantic search enriches context by retrieving relevant past conversations and stored facts
 - Learns your preferences through the "Soul" personalization system
 
 ### Browser Automation
@@ -93,9 +94,9 @@ Unlike simple chatbots, Pocket Assistant uses a multi-agent architecture where s
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Main Agent                                │
 │                    (LangGraph ReAct)                            │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐        │
-│  │  Tools   │  │  Memory  │  │   Soul   │  │ Scheduler│        │
-│  └────┬─────┘  └──────────┘  └──────────┘  └──────────┘        │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────┐ │
+│  │  Tools   │  │  Memory  │  │   Soul   │  │ Scheduler│  │State│ │
+│  └────┬─────┘  └──────────┘  └──────────┘  └──────────┘  └────┘ │
 └───────┼─────────────────────────────────────────────────────────┘
         │
         ├─────────────────┬─────────────────┐
@@ -114,7 +115,8 @@ Unlike simple chatbots, Pocket Assistant uses a multi-agent architecture where s
 | **Browser Agent** | Plans complex web tasks, executes them step-by-step with Playwright |
 | **Coder Agent** | Manages code projects with file operations, git, and command execution |
 | **Soul Service** | Stores user preferences and personality settings |
-| **Memory Service** | Manages conversation history with automatic summarization |
+| **Memory Service** | Two-layer memory: conversation history (with summarization) and long-term semantic memory; hybrid search enriches context |
+| **State Service** | Per-chat key-value state with optional TTL for scheduled tasks and cross-session data |
 | **Scheduler** | Handles reminders and recurring tasks with cron support |
 
 ---
@@ -153,7 +155,7 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 OPENROUTER_API_KEY=your_openrouter_api_key
 ```
 
-Edit `config.json` to add your Telegram user ID:
+Edit `data/config.json` to add your Telegram user ID (created on first run if missing):
 
 ```json
 {
@@ -176,21 +178,35 @@ npm run build
 npm run start:prod
 ```
 
+### Package scripts
+
+| Script | Description |
+|--------|-------------|
+| `npm run start` | Start the app with watch mode (hot reload) |
+| `npm run start:dev` | Same as `start` – development with watch mode |
+| `npm run start:prod` | Start the app (no watch; run after `build` for production) |
+| `npm run start:debug` | Start with Node inspector for debugging |
+| `npm run build` | Compile the NestJS app for production |
+| `npm run lint` | Run ESLint and fix issues |
+| `npm run format` | Format source with Prettier |
+| `npm run browser` | Run the browser helper script (opens Playwright browser) |
+
 ---
 
 ## Docker
 
-### Quick Start with Docker Compose
+Docker is used only to run **Langfuse** (LLM observability). Run the app locally with `npm run start:dev`.
+
+### Start Langfuse (optional)
 
 ```bash
-# Start the bot with self-hosted Langfuse observability
 docker compose up -d
-
-# Or just the bot (without Langfuse)
-docker compose -f docker-compose.simple.yml up -d
+# Dashboard: http://localhost:31111
 ```
 
-### Build Only
+Then in `.env` set `LANGFUSE_HOST=http://localhost:31111` and add your keys from the Langfuse project settings.
+
+### Build app image (optional)
 
 ```bash
 docker build -t pocket-assistant-ai .
@@ -212,14 +228,12 @@ docker build -t pocket-assistant-ai .
 
 ## Configuration
 
-### config.json
+### data/config.json
+
+Configuration is loaded from `data/config.json` (created with defaults on first run). Example:
 
 ```json
 {
-  "logging": {
-    "enabled": false,
-    "logToFile": false
-  },
   "security": {
     "allowedUserIds": ["123456789"]
   },
@@ -260,11 +274,12 @@ LANGFUSE_HOST=https://cloud.langfuse.com
 
 #### Self-Hosted Langfuse
 
-The included `docker-compose.yml` sets up a local Langfuse instance:
+The included `docker-compose.yml` runs only Langfuse (and its Postgres). Run the app with `npm run start:dev`.
 
 ```bash
 docker compose up -d
-# Access Langfuse at http://localhost:3001
+# Dashboard: http://localhost:31111
+# In .env: LANGFUSE_HOST=http://localhost:31111
 ```
 
 ---
@@ -336,21 +351,22 @@ pocket-assistant-ai/
 │   ├── coder/           # Code assistant agent
 │   ├── config/          # Configuration management
 │   ├── logger/          # Logging and tracing
-│   ├── memory/          # Conversation memory
+│   ├── memory/          # Conversation + long-term memory, embeddings, semantic search
 │   ├── messaging/       # Messaging abstraction layer
 │   ├── model/           # Model factory service
 │   ├── prompts/         # Prompt templates (YAML)
 │   ├── scheduler/       # Task scheduling
 │   ├── soul/            # User personalization
+│   ├── state/           # Per-chat key-value state (TTL support)
 │   ├── telegram/        # Telegram integration
 │   ├── usage/           # Token usage tracking
 │   └── utils/           # Utilities and sanitization
 ├── data/
+│   ├── config.json      # Application config (created on first run)
 │   ├── prompts/         # YAML prompt files
-│   └── {userId}/        # Per-user data storage
-├── docker-compose.yml   # Full stack with Langfuse
-├── Dockerfile           # Production container
-└── config.json          # Application config
+│   └── {userId}/        # Per-user: memory.json, longterm-memory.json, state.json, schedules, soul, etc.
+├── docker-compose.yml   # Langfuse only (port 31111)
+└── Dockerfile           # Production container
 ```
 
 ---
@@ -415,26 +431,4 @@ capabilities:
 - **[OpenRouter](https://openrouter.ai/)** - LLM API gateway
 - **[Langfuse](https://langfuse.com/)** - LLM observability
 
----
 
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
----
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-<p align="center">
-  Made with <a href="https://nestjs.com/">NestJS</a> and <a href="https://langchain.com/">LangChain</a>
-</p>

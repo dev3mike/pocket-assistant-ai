@@ -5,6 +5,7 @@
  */
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import * as fs from 'fs';
+import * as fsPromises from 'fs/promises';
 import * as path from 'path';
 
 export interface AppConfig {
@@ -105,8 +106,9 @@ export class ConfigService implements OnModuleInit, OnModuleDestroy {
 
   private async loadConfig(): Promise<void> {
     try {
-      if (fs.existsSync(this.configPath)) {
-        const data = fs.readFileSync(this.configPath, 'utf-8');
+      const exists = await fsPromises.access(this.configPath).then(() => true).catch(() => false);
+      if (exists) {
+        const data = await fsPromises.readFile(this.configPath, 'utf-8');
         const loaded = JSON.parse(data);
         this.config = {
           enableLogging: loaded.enableLogging ?? DEFAULT_CONFIG.enableLogging,
@@ -132,7 +134,7 @@ export class ConfigService implements OnModuleInit, OnModuleDestroy {
   private async saveConfig(): Promise<void> {
     try {
       this.lastSaveTime = Date.now();
-      fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));
+      await fsPromises.writeFile(this.configPath, JSON.stringify(this.config, null, 2));
     } catch (error) {
       this.logger.error(`Failed to save config: ${error}`);
     }

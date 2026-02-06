@@ -1,33 +1,10 @@
 version: '3.8'
 
-services:
-  # Main Pocket Assistant AI Bot
-  pocket-assistant:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: pocket-assistant-ai
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      - NODE_ENV=production
-      # Langfuse connection (uses the self-hosted instance below)
-      - LANGFUSE_HOST=http://langfuse-web:3000
-    volumes:
-      # Persist user data
-      - ./data:/app/data
-      # Persist logs
-      - ./logs:/app/logs
-      # Config file
-      - ./config.json:/app/config.json:ro
-    depends_on:
-      langfuse-web:
-        condition: service_healthy
-    networks:
-      - pocket-assistant-network
+# Langfuse only. Run the app locally with: npm run start:dev
+# Start Langfuse: docker-compose up -d
+# Dashboard: http://localhost:31111
 
-  # Langfuse - LLM Observability Platform (Self-hosted)
+services:
   langfuse-web:
     image: langfuse/langfuse:2
     container_name: langfuse-web
@@ -36,11 +13,11 @@ services:
       - DATABASE_URL=postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
       - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET:-supersecret}
       - SALT=${LANGFUSE_SALT:-supersalt}
-      - NEXTAUTH_URL=http://localhost:3001
+      - NEXTAUTH_URL=http://localhost:31111
       - TELEMETRY_ENABLED=false
       - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=false
     ports:
-      - "3001:3000"
+      - "31111:3000"
     depends_on:
       langfuse-db:
         condition: service_healthy
@@ -51,9 +28,8 @@ services:
       retries: 3
       start_period: 40s
     networks:
-      - pocket-assistant-network
+      - langfuse-network
 
-  # PostgreSQL for Langfuse
   langfuse-db:
     image: postgres:15-alpine
     container_name: langfuse-db
@@ -70,11 +46,11 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - pocket-assistant-network
+      - langfuse-network
 
 volumes:
   langfuse-db-data:
 
 networks:
-  pocket-assistant-network:
+  langfuse-network:
     driver: bridge
