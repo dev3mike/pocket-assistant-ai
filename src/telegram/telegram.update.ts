@@ -16,6 +16,7 @@ import { SchedulerService } from '../scheduler/scheduler.service';
 import { AiService } from '../ai/ai.service';
 import { TelegramService } from './telegram.service';
 import { MemoryService } from '../memory/memory.service';
+import { ProgressUpdate } from '../messaging/messaging.interface';
 
 const UNAUTHORIZED_MESSAGE = `🚫 *Access Denied*
 
@@ -75,8 +76,8 @@ export class TelegramUpdate {
 
     this.agentLogger.info(LogEvent.MESSAGE_RECEIVED, 'User started the bot', { chatId });
 
-    // Reset memory on /start
-    this.memoryService.resetMemory(chatId);
+    // Reset memory on /start (extracts important facts first)
+    await this.memoryService.resetMemory(chatId);
     this.agentLogger.info(LogEvent.CONVERSATION_CLEARED, 'Memory reset on /start', { chatId });
 
     // Check if user has completed onboarding
@@ -115,12 +116,7 @@ export class TelegramUpdate {
     await this.sendWithMarkdown(
       ctx,
       `${welcomeMessage}\n\n` +
-      `Commands:\n` +
-      `/help - Show available commands\n` +
-      `/clear - Clear conversation history\n` +
-      `/tools - List available tools\n` +
-      `/profile - View/update your profile\n` +
-      `/schedules - View scheduled reminders`,
+      `To see available commands, call /help`,
     );
   }
 
@@ -144,6 +140,7 @@ export class TelegramUpdate {
       `/start - Start/restart the bot\n` +
       `/help - Show this help message\n` +
       `/clear - Clear conversation history\n` +
+      `/resetmemory - Clear long-term memories\n` +
       `/tools - List available tools\n` +
       `/profile - View your profile settings\n` +
       `/schedules - View scheduled reminders\n` +
@@ -165,8 +162,31 @@ export class TelegramUpdate {
     const chatId = ctx.chat?.id;
     if (!chatId) return;
 
-    this.agentService.clearConversation(chatId.toString());
+    await this.agentService.clearConversation(chatId.toString());
     await ctx.reply("🗑️ Conversation history cleared. Let's start fresh!");
+  }
+
+  @Command('resetmemory')
+  async onResetMemory(@Ctx() ctx: Context) {
+    if (!(await this.checkAuthorization(ctx))) {
+      return;
+    }
+
+    const chatId = ctx.chat?.id?.toString();
+    if (!chatId) return;
+
+    this.agentLogger.info(LogEvent.MESSAGE_RECEIVED, 'User requested long-term memory reset', { chatId });
+
+    const longTermService = this.memoryService.getLongTermMemoryService();
+    const stats = longTermService.getStats(chatId);
+
+    if (stats.total === 0) {
+      await ctx.reply('📭 No long-term memories to clear.');
+      return;
+    }
+
+    longTermService.clearMemories(chatId);
+    await ctx.reply(`🧹 Cleared ${stats.total} long-term memories.\n\n_Your conversation history is preserved. Only stored facts/preferences were removed._`);
   }
 
   @Command('tools')
@@ -232,8 +252,8 @@ export class TelegramUpdate {
     // Delete existing soul data
     this.soulService.deleteSoulData(chatId);
 
-    // Clear conversation history
-    this.agentService.clearConversation(chatId);
+    // Clear conversation history (extracts important facts first)
+    await this.agentService.clearConversation(chatId);
 
     // Cancel any ongoing onboarding
     this.soulService.cancelOnboarding(chatId);
@@ -306,8 +326,28 @@ export class TelegramUpdate {
       return;
     }
 
-    // Show typing indicator
-    await ctx.sendChatAction('typing');
+    // Send initial "Thinking..." message for progress updates
+    const initialMsg = await ctx.reply('💭 Thinking...');
+    const messageId = initialMsg.message_id;
+
+    // Create progress callback that updates the message
+    const onProgress = (update: ProgressUpdate) => {
+      // Build progress display with recent updates
+      const indicators: Record<string, string> = {
+        thinking: '💭',
+        tool_start: '⚙️',
+        tool_progress: '🔄',
+        tool_complete: '✅',
+        error: '❌',
+      };
+      const indicator = indicators[update.type] || '•';
+      const progressText = `${indicator} ${update.message}`;
+
+      // Update the message (fire and forget to not block agent)
+      this.telegramService.editMessage(chatIdStr, messageId, progressText).catch(() => {
+        // Silently ignore edit failures (e.g., rate limits, same content)
+      });
+    };
 
     // Keep typing indicator active for long operations
     const typingInterval = setInterval(() => {
@@ -315,20 +355,32 @@ export class TelegramUpdate {
     }, 4000);
 
     try {
-      const { text: textResponse, screenshots: screenshotPaths } = await this.agentService.processMessage(chatIdStr, text);
+      const { text: textResponse, screenshots: screenshotPaths } = await this.agentService.processMessage(
+        chatIdStr,
+        text,
+        onProgress,
+      );
 
       clearInterval(typingInterval);
 
       // Telegram rejects empty messages (400: message text is empty)
       const textToSend = textResponse.trim() || "I didn't generate a response for that. Please try again.";
+
       // Telegram has a 4096 character limit per message
       if (textToSend.length > 4000) {
+        // For long responses, edit initial message with first chunk, then send rest
         const chunks = this.splitMessage(textToSend, 4000);
-        for (const chunk of chunks) {
-          await this.sendWithMarkdown(ctx, chunk);
+        await this.telegramService.editMessage(chatIdStr, messageId, chunks[0]);
+        for (let i = 1; i < chunks.length; i++) {
+          await this.sendWithMarkdown(ctx, chunks[i]);
         }
       } else {
-        await this.sendWithMarkdown(ctx, textToSend);
+        // Replace progress message with final response
+        const editSuccess = await this.telegramService.editMessage(chatIdStr, messageId, textToSend);
+        if (!editSuccess) {
+          // Fallback to sending new message if edit fails
+          await this.sendWithMarkdown(ctx, textToSend);
+        }
       }
 
       // Send screenshots from tool artifact (no need to parse marker from text)
@@ -339,7 +391,9 @@ export class TelegramUpdate {
       clearInterval(typingInterval);
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.logger.error(`Error processing message for chat ${chatId}: ${errorMsg}`);
-      await ctx.reply('❌ Sorry, something went wrong. Please try again.');
+
+      // Update the progress message with error
+      await this.telegramService.editMessage(chatIdStr, messageId, '❌ Sorry, something went wrong. Please try again.');
     }
   }
 

@@ -115,7 +115,7 @@ export class TraceService implements OnModuleInit, OnModuleDestroy {
    * Start a new trace (for a new request/message)
    * Creates a Langfuse trace if enabled.
    */
-  startTrace(chatId?: string, metadata?: Record<string, any>): TraceContext {
+  startTrace(chatId?: string, metadata?: Record<string, any>, input?: any): TraceContext {
     const traceId = randomUUID();
 
     // Create Langfuse trace if enabled
@@ -125,6 +125,7 @@ export class TraceService implements OnModuleInit, OnModuleDestroy {
           id: traceId,
           name: 'request',
           userId: chatId,
+          input,
           metadata: {
             chatId,
             ...metadata,
@@ -143,6 +144,20 @@ export class TraceService implements OnModuleInit, OnModuleDestroy {
       rootSpanId,
       chatId,
     };
+  }
+
+  /**
+   * Update the trace with output data (call before endTrace)
+   */
+  updateTraceOutput(traceId: string, output: any): void {
+    const langfuseTrace = this.langfuseTraces.get(traceId);
+    if (langfuseTrace) {
+      try {
+        langfuseTrace.update({ output });
+      } catch (error) {
+        this.logger.debug(`Failed to update Langfuse trace output: ${error}`);
+      }
+    }
   }
 
   /**

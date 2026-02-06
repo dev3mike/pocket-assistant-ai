@@ -180,4 +180,38 @@ export class TelegramService implements OnModuleInit {
 
     return message;
   }
+
+  /**
+   * Edit an existing message
+   * @param chatId - The chat ID
+   * @param messageId - The message ID to edit
+   * @param text - The new message text
+   * @returns true if successful, false otherwise
+   */
+  async editMessage(chatId: string, messageId: number, text: string): Promise<boolean> {
+    // Telegram API returns 400 when message text is empty
+    const messageText = text && text.trim() ? text.trim() : '(No response)';
+
+    try {
+      await this.bot.telegram.editMessageText(chatId, messageId, undefined, messageText, {
+        parse_mode: 'Markdown',
+      });
+      this.logger.debug(`Message ${messageId} edited in chat ${chatId}`);
+      return true;
+    } catch (error) {
+      // Try without markdown if it fails (common issue with special characters)
+      try {
+        await this.bot.telegram.editMessageText(chatId, messageId, undefined, messageText);
+        this.logger.debug(`Message ${messageId} edited in chat ${chatId} (plain text fallback)`);
+        return true;
+      } catch (plainError) {
+        const errorMsg = plainError instanceof Error ? plainError.message : String(plainError);
+        // Don't log error if message is not modified (same content)
+        if (!errorMsg.includes('message is not modified')) {
+          this.logger.error(`Failed to edit message ${messageId} in chat ${chatId}: ${errorMsg}`);
+        }
+        return false;
+      }
+    }
+  }
 }

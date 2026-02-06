@@ -499,6 +499,54 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Get inactive (cancelled/completed) jobs for a specific chat
+   */
+  getInactiveJobsForChat(chatId: string): ScheduledJob[] {
+    return this.jobs.filter(
+      (j) => j.chatId === chatId && (j.status === 'cancelled' || j.status === 'completed'),
+    );
+  }
+
+  /**
+   * Reactivate a cancelled or completed job
+   */
+  reactivateJob(jobId: string, chatId: string, newExecuteAt?: string): boolean {
+    const job = this.jobs.find((j) => j.id === jobId && j.chatId === chatId);
+
+    if (!job) {
+      return false;
+    }
+
+    if (job.status === 'active') {
+      return false; // Already active
+    }
+
+    // For one-time jobs, require a new execution time if the old one has passed
+    if (job.scheduleType === 'once') {
+      if (newExecuteAt) {
+        const newTime = new Date(newExecuteAt);
+        if (isNaN(newTime.getTime()) || newTime <= new Date()) {
+          return false; // Invalid or past time
+        }
+        job.executeAt = newExecuteAt;
+      } else if (job.executeAt) {
+        const oldTime = new Date(job.executeAt);
+        if (oldTime <= new Date()) {
+          return false; // Old time has passed and no new time provided
+        }
+      }
+      // Reset execution count for one-time jobs
+      job.executionCount = 0;
+    }
+
+    job.status = 'active';
+    this.saveJobs();
+
+    this.logger.log(`Reactivated job ${jobId}`);
+    return true;
+  }
+
+  /**
    * Cancel a job
    */
   cancelJob(jobId: string, chatId: string): boolean {
@@ -536,7 +584,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    return `*${job.description}*\nID: \`${job.id}\`\nSchedule: ${schedule}\nStatus: ${job.status}`;
+    return `*${job.description}*\nID: \`${job.id}\`\nSchedule: ${schedule}\nStatus: ${job.status}\n\n${job.taskContext}\n-------------------`;
   }
 
   /**
