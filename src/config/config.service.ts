@@ -11,18 +11,23 @@ export interface AppConfig {
   enableLogging: boolean;
   model: string;
   vision_model: string;
+  coder_model: string;
   security: {
     allowedUserIds: string[];
   };
+  /** Per-chat active coder project folder (chatId -> folder name under data/coder/) */
+  coderActiveByChat?: Record<string, string>;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
   enableLogging: false,
   model: 'google/gemini-3-flash-preview',
   vision_model: 'openai/gpt-4o-mini',
+  coder_model: 'google/gemini-3-flash-preview',
   security: {
     allowedUserIds: [],
   },
+  coderActiveByChat: {},
 };
 
 @Injectable()
@@ -107,7 +112,11 @@ export class ConfigService implements OnModuleInit, OnModuleDestroy {
           enableLogging: loaded.enableLogging ?? DEFAULT_CONFIG.enableLogging,
           model: loaded.model ?? DEFAULT_CONFIG.model,
           vision_model: loaded.vision_model ?? DEFAULT_CONFIG.vision_model,
+          coder_model: loaded.coder_model ?? DEFAULT_CONFIG.coder_model,
           security: { ...DEFAULT_CONFIG.security, ...loaded.security },
+          coderActiveByChat: loaded.coderActiveByChat != null && typeof loaded.coderActiveByChat === 'object'
+            ? { ...loaded.coderActiveByChat }
+            : DEFAULT_CONFIG.coderActiveByChat,
         };
         this.logger.log('Configuration loaded from config.json');
       } else {
@@ -178,5 +187,20 @@ export class ConfigService implements OnModuleInit, OnModuleDestroy {
       await this.saveConfig();
       this.logger.log(`User ${userId} removed from allowed list`);
     }
+  }
+
+  // ===== Coder active folder (per chat) =====
+
+  getCoderActiveFolder(chatId: string): string | null {
+    const map = this.config.coderActiveByChat ?? {};
+    const folder = map[chatId];
+    return folder && typeof folder === 'string' ? folder : null;
+  }
+
+  async setCoderActiveFolder(chatId: string, folder: string): Promise<void> {
+    const map = this.config.coderActiveByChat ?? {};
+    this.config.coderActiveByChat = { ...map, [chatId]: folder };
+    await this.saveConfig();
+    this.logger.debug(`Coder active folder for ${chatId} set to ${folder}`);
   }
 }
