@@ -4,6 +4,7 @@ import { TelegrafModule } from 'nestjs-telegraf';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { TelegramModule } from './telegram/telegram.module';
+import { MessagingModule } from './messaging/messaging.module';
 import { AgentModule } from './agent/agent.module';
 import { AppConfigModule } from './config/config.module';
 import { SoulModule } from './soul/soul.module';
@@ -11,6 +12,9 @@ import { AiModule } from './ai/ai.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { BrowserModule } from './browser/browser.module';
 import { UsageModule } from './usage/usage.module';
+import { CoderModule } from './coder/coder.module';
+import { ModelModule } from './model/model.module';
+import { PromptModule } from './prompts/prompt.module';
 
 @Module({
   imports: [
@@ -18,6 +22,8 @@ import { UsageModule } from './usage/usage.module';
       isGlobal: true,
     }),
     AppConfigModule,
+    ModelModule,
+    PromptModule,
     AiModule,
     SoulModule,
     UsageModule,
@@ -32,10 +38,12 @@ import { UsageModule } from './usage/usage.module';
       }),
       inject: [ConfigService],
     }),
+    TelegramModule,
+    MessagingModule, // Global messaging abstraction layer (must come after TelegramModule)
     AgentModule,
     SchedulerModule,
     BrowserModule,
-    TelegramModule,
+    CoderModule,
   ],
   controllers: [AppController],
   providers: [AppService],
