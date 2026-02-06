@@ -130,56 +130,6 @@ export function safeJsonParse<T>(json: string, fallback: T): T {
 }
 
 /**
- * Strip ReAct thinking patterns from LLM responses.
- * Removes **Thought:**, **Observation:**, **Action:** markers and their content
- * from responses before sending to users.
- * Returns both the cleaned response and extracted thoughts for debugging.
- */
-export function stripReActThinking(content: string): {
-  cleanedResponse: string;
-  thoughts: string[];
-  observations: string[];
-} {
-  if (!content || typeof content !== 'string') {
-    return { cleanedResponse: '', thoughts: [], observations: [] };
-  }
-
-  const thoughts: string[] = [];
-  const observations: string[] = [];
-
-  // Extract thoughts and observations for debugging
-  const thoughtMatches = content.match(/\*\*Thought:\*\*\s*([^\n*]+)/gi);
-  if (thoughtMatches) {
-    for (const match of thoughtMatches) {
-      const thought = match.replace(/\*\*Thought:\*\*/i, '').trim();
-      if (thought) thoughts.push(thought);
-    }
-  }
-
-  const obsMatches = content.match(/\*\*Observation:\*\*\s*([^\n*]+)/gi);
-  if (obsMatches) {
-    for (const match of obsMatches) {
-      const obs = match.replace(/\*\*Observation:\*\*/i, '').trim();
-      if (obs) observations.push(obs);
-    }
-  }
-
-  // Remove the thinking patterns from the response
-  let cleaned = content
-    // Remove **Thought:** lines (with or without following content)
-    .replace(/\*\*Thought:\*\*\s*[^\n]*/gi, '')
-    // Remove **Observation:** lines
-    .replace(/\*\*Observation:\*\*\s*[^\n]*/gi, '')
-    // Remove **Action:** lines (we keep the actual action result)
-    .replace(/\*\*Action:\*\*\s*[^\n]*/gi, '')
-    // Clean up excessive whitespace left behind
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-
-  return { cleanedResponse: cleaned, thoughts, observations };
-}
-
-/**
  * Extract JSON from a string that may contain markdown code blocks or extra text.
  * Returns the parsed JSON or the fallback if extraction/parsing fails.
  */
