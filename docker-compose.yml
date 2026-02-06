@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  # Main Pocket Assistant AI Bot
+  pocket-assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pocket-assistant-ai
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      # Langfuse connection (uses the self-hosted instance below)
+      - LANGFUSE_HOST=http://langfuse-web:3000
+    volumes:
+      # Persist user data
+      - ./data:/app/data
+      # Persist logs
+      - ./logs:/app/logs
+      # Config file
+      - ./config.json:/app/config.json:ro
+    depends_on:
+      langfuse-web:
+        condition: service_healthy
+    networks:
+      - pocket-assistant-network
+
+  # Langfuse - LLM Observability Platform (Self-hosted)
+  langfuse-web:
+    image: langfuse/langfuse:2
+    container_name: langfuse-web
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET:-supersecret}
+      - SALT=${LANGFUSE_SALT:-supersalt}
+      - NEXTAUTH_URL=http://localhost:3001
+      - TELEMETRY_ENABLED=false
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=false
+    ports:
+      - "3001:3000"
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/public/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - pocket-assistant-network
+
+  # PostgreSQL for Langfuse
+  langfuse-db:
+    image: postgres:15-alpine
+    container_name: langfuse-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=langfuse
+      - POSTGRES_PASSWORD=langfuse
+      - POSTGRES_DB=langfuse
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pocket-assistant-network
+
+volumes:
+  langfuse-db-data:
+
+networks:
+  pocket-assistant-network:
+    driver: bridge

@@ -1,0 +1,29 @@
+version: '3.8'
+
+# Simple docker-compose for just the bot (without self-hosted Langfuse)
+# Use this if you want to use Langfuse Cloud instead of self-hosting
+
+services:
+  pocket-assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pocket-assistant-ai
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    volumes:
+      # Persist user data
+      - ./data:/app/data
+      # Persist logs
+      - ./logs:/app/logs
+      # Config file
+      - ./config.json:/app/config.json:ro
+    networks:
+      - pocket-assistant-network
+
+networks:
+  pocket-assistant-network:
+    driver: bridge

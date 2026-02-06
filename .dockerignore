@@ -1,0 +1,37 @@
+# Dependencies
+node_modules
+.npm
+
+# Build output
+dist
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Data directories (mounted as volumes)
+data
+logs
+
+# Development files
+.git
+.gitignore
+*.md
+!data/prompts/*.yaml
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Test files
+test
+*.spec.ts
+coverage
+
+# Misc
+.DS_Store
+Thumbs.db
+*.log
