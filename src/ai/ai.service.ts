@@ -8,22 +8,22 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { UsageService } from '../usage/usage.service';
-import { ConfigService } from 'src/config/config.service';
+import { ModelFactoryService } from '../model/model-factory.service';
+import { PromptService } from '../prompts/prompt.service';
+import { sanitize, extractAndParseJson } from '../utils/input-sanitizer';
 
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
   private model: ChatOpenAI;
 
-  constructor(private readonly usageService: UsageService, private readonly configService: ConfigService) {
-    this.model = new ChatOpenAI({
-      model: this.configService.getConfig().model,
-      temperature: 0.7, // Slightly creative for natural responses
-      configuration: {
-        baseURL: 'https://openrouter.ai/api/v1',
-        apiKey: process.env.OPENROUTER_API_KEY,
-      },
-    });
+  constructor(
+    private readonly usageService: UsageService,
+    private readonly modelFactory: ModelFactoryService,
+    private readonly promptService: PromptService,
+  ) {
+    // Use ModelFactory with creative temperature for natural responses
+    this.model = this.modelFactory.getModel('creative');
   }
 
 
@@ -272,11 +272,18 @@ Rules:
     userDescription: string;
     additionalContext: string;
   }> {
+    // Fallback values for safe JSON parsing
+    const fallback = {
+      aiCharacter: rawData.aiCharacter,
+      userDescription: rawData.userDescription,
+      additionalContext: rawData.additionalContext,
+    };
+
     try {
-      const response = await this.model.invoke([
-        new SystemMessage(
-          `You are refining user-provided data for an AI assistant's personality configuration.
-          
+      // Get prompt from PromptService or use default
+      const systemPromptText = this.promptService.getAiServicePrompt('refineSoulData').system ||
+        `You are refining user-provided data for an AI assistant's personality configuration.
+
 Your task is to enhance and clarify the descriptions while keeping the user's intent.
 
 Rules:
@@ -285,21 +292,23 @@ Rules:
 - Format as clear, concise statements
 - Don't add things the user didn't mention
 - Keep it professional and helpful
-- Return ONLY a JSON object with the refined fields`,
-        ),
+- Return ONLY a JSON object with the refined fields`;
+
+      const response = await this.model.invoke([
+        new SystemMessage(systemPromptText),
         new HumanMessage(
           `Refine these AI personality settings:
 
-AI Name: ${rawData.aiName}
-AI Character (raw): ${rawData.aiCharacter}
-User Name: ${rawData.userName}
-User Description (raw): ${rawData.userDescription}
-Additional Context (raw): ${rawData.additionalContext || 'none'}
+AI Name: ${sanitize(rawData.aiName, 100)}
+AI Character (raw): ${sanitize(rawData.aiCharacter, 500)}
+User Name: ${sanitize(rawData.userName, 100)}
+User Description (raw): ${sanitize(rawData.userDescription, 500)}
+Additional Context (raw): ${sanitize(rawData.additionalContext || 'none', 500)}
 
 Return a JSON object with these refined fields:
 {
   "aiCharacter": "refined personality description",
-  "userDescription": "refined user description", 
+  "userDescription": "refined user description",
   "additionalContext": "refined additional context or empty string"
 }`,
         ),
@@ -311,30 +320,49 @@ Return a JSON object with these refined fields:
 
       const content = typeof response.content === 'string' ? response.content : String(response.content);
 
-      // Extract JSON from response (handle markdown code blocks)
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const refined = JSON.parse(jsonMatch[0]);
-        return {
-          aiCharacter: refined.aiCharacter || rawData.aiCharacter,
-          userDescription: refined.userDescription || rawData.userDescription,
-          additionalContext: refined.additionalContext || rawData.additionalContext,
-        };
-      }
-
+      // Use safe JSON extraction
+      const refined = extractAndParseJson<typeof fallback>(content, fallback);
       return {
-        aiCharacter: rawData.aiCharacter,
-        userDescription: rawData.userDescription,
-        additionalContext: rawData.additionalContext,
+        aiCharacter: refined.aiCharacter || rawData.aiCharacter,
+        userDescription: refined.userDescription || rawData.userDescription,
+        additionalContext: refined.additionalContext || rawData.additionalContext,
       };
     } catch (error) {
       this.logger.error(`Failed to refine soul data: ${error}`);
-      // Return original data if refinement fails
-      return {
-        aiCharacter: rawData.aiCharacter,
-        userDescription: rawData.userDescription,
-        additionalContext: rawData.additionalContext,
-      };
+      return fallback;
+    }
+  }
+
+  /**
+   * Classify whether a message is a coding-related task (clone repo, edit files, git, PR review, etc.).
+   * Used by CoderRouterService so routing can be LLM-based instead of keyword heuristic.
+   */
+  async isCodingTask(message: string, chatId?: string): Promise<boolean> {
+    const trimmed = message?.trim();
+    if (!trimmed) return false;
+    try {
+      const response = await this.model.invoke([
+        new SystemMessage(
+          `You are a classifier. Your only job is to decide if the user message is a CODING-RELATED TASK.
+
+Coding-related means: cloning a git repo, viewing/editing/writing files or code, git operations (commit, push, pull, status), running commands or scripts in a project, reviewing code or a GitHub PR, creating or modifying code files, working with a codebase or repository.
+
+NOT coding-related: general chat, reminders, scheduling, browsing websites (unless to get code), profile updates, asking about the weather, etc.
+
+Reply with exactly one word: YES or NO.`,
+        ),
+        new HumanMessage(trimmed.slice(0, 2000)),
+      ]);
+      if (AIMessage.isInstance(response)) {
+        this.usageService.recordUsageFromResponse(chatId, response);
+      }
+      const text = (typeof response.content === 'string' ? response.content : String(response.content))
+        .trim()
+        .toUpperCase();
+      return text.startsWith('YES');
+    } catch (error) {
+      this.logger.warn(`isCodingTask classification failed: ${error}`);
+      return false;
     }
   }
 }

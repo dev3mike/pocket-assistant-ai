@@ -24,10 +24,14 @@ import * as z from 'zod';
 import { AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage } from '@langchain/core/messages';
 import { ConfigService } from '../config/config.service';
 import { AgentLoggerService, LogEvent } from '../logger/agent-logger.service';
+import { TraceService, TraceContext } from '../logger/trace.service';
 import { ToolsService } from './tools.service';
 import { SoulService } from '../soul/soul.service';
 import { MemoryService } from '../memory/memory.service';
 import { UsageService } from '../usage/usage.service';
+import { ModelFactoryService } from '../model/model-factory.service';
+import { PromptService } from '../prompts/prompt.service';
+import { sanitize, stripReActThinking } from '../utils/input-sanitizer';
 
 
 @Injectable()
@@ -42,10 +46,13 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly configService: ConfigService,
     private readonly agentLogger: AgentLoggerService,
+    private readonly traceService: TraceService,
     private readonly toolsService: ToolsService,
     private readonly soulService: SoulService,
     private readonly memoryService: MemoryService,
     private readonly usageService: UsageService,
+    private readonly modelFactory: ModelFactoryService,
+    private readonly promptService: PromptService,
   ) { }
 
   async onModuleInit() {
@@ -63,14 +70,8 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
       throw new Error('OPENROUTER_API_KEY environment variable is not set');
     }
 
-    this.model = new ChatOpenAI({
-      model: this.configService.getConfig().model,
-      temperature: 0,
-      configuration: {
-        baseURL: 'https://openrouter.ai/api/v1',
-        apiKey: process.env.OPENROUTER_API_KEY,
-      },
-    });
+    // Use ModelFactory for centralized model management
+    this.model = this.modelFactory.getModel('main');
 
     // Try to load Zapier tools if configured (these are shared across all users)
     if (process.env.ZAPIER_MCP_TOKEN) {
@@ -147,44 +148,14 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
    */
   private buildSystemPrompt(chatId: string): string {
     const soulContext = this.soulService.getSoulContext(chatId);
-
-    const basePrompt = `You are a helpful AI assistant in a Telegram bot.
-
-Available capabilities:
-- Get current date/time
-- Enable/disable logging (console and file)
-- Update your name or personality (if user asks to change it)
-- Update user profile information
-- Add preferences or context to remember
-- View current profile settings
-- Schedule reminders and tasks (one-time or recurring)
-- List and manage scheduled tasks
-- Browser automation (visit websites, extract data, fill forms, take screenshots)
-- Zapier integrations (if configured)
-
-Be concise in your responses. Use tools when needed.
-When the user wants to update their profile or your settings, use the appropriate tool.
-When the user asks to be reminded about something or schedule a task, use the createSchedule tool.
-IMPORTANT: Before scheduling, ensure you have COMPLETE details about what should happen. If the request is vague (e.g., "schedule a morning brief"), ask what it should include before creating the schedule. Do NOT make assumptions about what the user wants.
-For natural language time like "in 2 hours" or "tomorrow at 9am", convert to ISO date format for one-time tasks.
-For recurring patterns like "every Monday" or "daily at 9am", use cron expressions.
-Tool choice for URLs: By default use httpRequest to check or fetch any URL (RSS feeds, APIs, web pages, etc.). Use executeBrowserTask only when the user explicitly asks to use the browser (e.g. "open in browser", "use the browser", "take a screenshot of ...", "visit ... in browser", or when they need to interact with the page, fill forms, or see the page visually).`;
-
-    if (soulContext) {
-      return `${soulContext}
-
----
-
-${basePrompt}`;
-    }
-
-    return basePrompt;
+    // Use PromptService for centralized prompt management with hot-reload
+    return this.promptService.buildMainAgentPrompt(soulContext || undefined);
   }
 
   /**
    * Build and run the agent for a specific conversation
    */
-  private buildAgent(chatId: string) {
+  private buildAgent(chatId: string, traceId: string, rootSpanId: string) {
     // Get tools specific to this chat
     const toolsByName = this.getToolsForChat(chatId);
     const tools = Object.values(toolsByName);
@@ -193,11 +164,17 @@ ${basePrompt}`;
     const modelWithTools = this.model.bindTools(tools);
 
     const agentLogger = this.agentLogger;
+    const traceService = this.traceService;
     const usageService = this.usageService;
     const systemPrompt = this.buildSystemPrompt(chatId);
 
     const MessagesState = new StateSchema({
       messages: MessagesValue,
+      traceId: new ReducedValue(z.string(), { reducer: (_, y) => y }),
+      rootSpanId: new ReducedValue(z.string(), { reducer: (_, y) => y }),
+      thoughts: new ReducedValue(z.array(z.string()).default([]), {
+        reducer: (x, y) => [...x, ...y],
+      }),
       llmCalls: new ReducedValue(z.number().default(0), {
         reducer: (x, y) => x + y,
       }),
@@ -210,17 +187,36 @@ ${basePrompt}`;
     });
 
     const llmCall: GraphNode<typeof MessagesState> = async (state) => {
-      agentLogger.info(LogEvent.LLM_INVOKE, `Invoking LLM (call #${state.llmCalls + 1})`, { chatId });
+      const spanId = traceService.startSpan('llm_call', state.traceId, state.rootSpanId, {
+        callNumber: state.llmCalls + 1,
+      });
+
+      agentLogger.info(LogEvent.LLM_INVOKE, `Invoking LLM (call #${state.llmCalls + 1})`, {
+        chatId,
+        data: { traceId: state.traceId.slice(0, 8) },
+      });
 
       const response = await modelWithTools.invoke([new SystemMessage(systemPrompt), ...state.messages]);
 
       // Extract token usage from response using helper
       let inTokens = 0;
       let outTokens = 0;
+      const thoughts: string[] = [];
+
       if (AIMessage.isInstance(response)) {
         const usage = usageService.extractUsageFromResponse(response);
         inTokens = usage.inputTokens;
         outTokens = usage.outputTokens;
+
+        // Extract ReAct thoughts from response content (look for **Thought:** pattern)
+        const content = String(response.content);
+        const thoughtMatches = content.match(/\*\*Thought:\*\*\s*([^\n*]+)/gi);
+        if (thoughtMatches) {
+          for (const match of thoughtMatches) {
+            const thought = match.replace(/\*\*Thought:\*\*/i, '').trim();
+            if (thought) thoughts.push(thought);
+          }
+        }
       }
 
       if (AIMessage.isInstance(response)) {
@@ -230,19 +226,30 @@ ${basePrompt}`;
             `LLM requested ${response.tool_calls.length} tool call(s)`,
             {
               chatId,
-              data: { toolCalls: response.tool_calls.map((tc) => ({ name: tc.name, args: tc.args })) },
+              data: {
+                traceId: state.traceId.slice(0, 8),
+                toolCalls: response.tool_calls.map((tc) => ({ name: tc.name, args: tc.args })),
+                thoughts,
+              },
             },
           );
         } else {
           agentLogger.info(LogEvent.LLM_RESPONSE, 'LLM generated response', {
             chatId,
-            data: { contentPreview: String(response.content).slice(0, 100) },
+            data: {
+              traceId: state.traceId.slice(0, 8),
+              contentPreview: String(response.content).slice(0, 100),
+              thoughts,
+            },
           });
         }
       }
 
+      traceService.endSpan(spanId, { inputTokens: inTokens, outputTokens: outTokens, thoughts });
+
       return {
         messages: [response],
+        thoughts,
         llmCalls: 1,
         inputTokens: inTokens,
         outputTokens: outTokens,
@@ -259,15 +266,21 @@ ${basePrompt}`;
       const results: ToolMessage[] = [];
 
       for (const toolCall of lastMessage.tool_calls ?? []) {
+        const toolSpanId = traceService.startSpan(`tool:${toolCall.name}`, state.traceId, state.rootSpanId, {
+          toolName: toolCall.name,
+          args: toolCall.args,
+        });
+
         agentLogger.info(LogEvent.TOOL_EXECUTING, `Executing tool: ${toolCall.name}`, {
           chatId,
-          data: { args: toolCall.args },
+          data: { traceId: state.traceId.slice(0, 8), args: toolCall.args },
         });
 
         const selectedTool = toolsByName[toolCall.name];
 
         if (!selectedTool) {
           agentLogger.error(LogEvent.TOOL_ERROR, `Tool not found: ${toolCall.name}`, { chatId });
+          traceService.endSpanWithError(toolSpanId, `Tool not found: ${toolCall.name}`);
           results.push(
             new ToolMessage({
               tool_call_id: toolCall.id!,
@@ -281,14 +294,16 @@ ${basePrompt}`;
           const observation = await selectedTool.invoke(toolCall);
           agentLogger.info(LogEvent.TOOL_RESULT, `Tool ${toolCall.name} completed`, {
             chatId,
-            data: { result: String(observation).slice(0, 200) },
+            data: { traceId: state.traceId.slice(0, 8), result: String(observation).slice(0, 200) },
           });
+          traceService.endSpan(toolSpanId, { resultPreview: String(observation).slice(0, 200) });
           results.push(observation);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
           agentLogger.error(LogEvent.TOOL_ERROR, `Tool ${toolCall.name} failed: ${errorMessage}`, {
             chatId,
           });
+          traceService.endSpanWithError(toolSpanId, errorMessage);
           results.push(
             new ToolMessage({
               tool_call_id: toolCall.id!,
@@ -332,31 +347,45 @@ ${basePrompt}`;
       return { text: 'Sorry, the AI assistant is still initializing. Please try again in a moment.', screenshots: [] };
     }
 
+    // Start a new trace for this request
+    const trace = this.traceService.startTrace(chatId);
+
+    // Sanitize user input to protect against prompt injection
+    const sanitizedMessage = sanitize(userMessage, 4000);
+
     this.agentLogger.info(LogEvent.MESSAGE_RECEIVED, `Received message`, {
       chatId,
-      data: { messagePreview: userMessage.slice(0, 100) },
+      data: { traceId: trace.traceId.slice(0, 8), messagePreview: sanitizedMessage.slice(0, 100) },
     });
 
     // Load messages from persistent memory
     const memoryMessages = this.memoryService.getMessages(chatId);
     const messages: BaseMessage[] = this.convertMemoryToMessages(memoryMessages);
 
-    // Add the new user message
-    messages.push(new HumanMessage(userMessage));
+    // Add the new user message (sanitized)
+    messages.push(new HumanMessage(sanitizedMessage));
 
-    // Save user message to memory
+    // Save user message to memory (original for display purposes)
     await this.memoryService.addMessage(chatId, 'user', userMessage);
 
     try {
       // Build agent with user-specific tools and system prompt
-      const agent = this.buildAgent(chatId);
+      const agent = this.buildAgent(chatId, trace.traceId, trace.rootSpanId);
 
       const result = await agent.invoke({
         messages: messages,
+        traceId: trace.traceId,
+        rootSpanId: trace.rootSpanId,
+        thoughts: [],
       });
 
       const finalContent = result.messages.at(-1)?.content;
-      const text = typeof finalContent === 'string' ? finalContent : JSON.stringify(finalContent);
+      const rawText = typeof finalContent === 'string' ? finalContent : JSON.stringify(finalContent);
+
+      // Strip ReAct thinking patterns from the response (keep clean text for user)
+      // Thoughts are kept for debugging in trace logs
+      const { cleanedResponse, thoughts: extractedThoughts } = stripReActThinking(rawText);
+      const text = cleanedResponse || rawText; // Fallback to raw if stripping removes everything
 
       // Collect screenshot paths from tool message artifacts (executeBrowserTask returns content_and_artifact)
       const screenshots: string[] = [];
@@ -375,15 +404,40 @@ ${basePrompt}`;
         this.agentLogger.debug(LogEvent.LLM_RESPONSE, `Token usage: ${inputTokens} in, ${outputTokens} out`, { chatId });
       }
 
-      // Save assistant response to memory (text only)
+      // Save assistant response to memory (cleaned text for user context)
       await this.memoryService.addMessage(chatId, 'assistant', text);
 
-      this.agentLogger.info(LogEvent.RESPONSE_SENT, `Sent response (${text.length} chars)`, { chatId });
+      // Combine extracted thoughts from response with those from state
+      const allThoughts = [...(result.thoughts || []), ...extractedThoughts];
+
+      // End the trace and log summary (include thoughts for debugging)
+      this.traceService.endSpan(trace.rootSpanId, {
+        inputTokens,
+        outputTokens,
+        llmCalls: result.llmCalls,
+        thoughtCount: allThoughts.length,
+        thoughts: allThoughts.length > 0 ? allThoughts : undefined,
+      });
+
+      const traceSummary = this.traceService.getTraceSummary(trace.traceId);
+      this.agentLogger.info(LogEvent.RESPONSE_SENT, `Sent response (${text.length} chars)`, {
+        chatId,
+        data: {
+          traceId: trace.traceId.slice(0, 8),
+          totalDurationMs: traceSummary?.totalDurationMs,
+          spanCount: traceSummary?.spanCount,
+          thoughts: allThoughts.length > 0 ? allThoughts : undefined,
+        },
+      });
 
       return { text, screenshots };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      this.agentLogger.error(LogEvent.ERROR, errorMessage, { chatId });
+      this.traceService.endSpanWithError(trace.rootSpanId, errorMessage);
+      this.agentLogger.error(LogEvent.ERROR, errorMessage, {
+        chatId,
+        data: { traceId: trace.traceId.slice(0, 8) },
+      });
       return { text: `Sorry, I encountered an error: ${errorMessage}`, screenshots: [] };
     }
   }
@@ -430,8 +484,9 @@ ${basePrompt}`;
     const profileTools = ['getProfile', 'updateProfile'];
     const schedulerTools = ['createSchedule', 'listSchedules', 'cancelSchedule'];
     const browserTools = ['executeBrowserTask'];
+    const coderTools = ['executeCoderTask'];
     const zapierToolNames = Object.keys(this.zapierTools);
 
-    return [...baseTools, ...profileTools, ...schedulerTools, ...browserTools, ...zapierToolNames];
+    return [...baseTools, ...profileTools, ...schedulerTools, ...browserTools, ...coderTools, ...zapierToolNames];
   }
 }

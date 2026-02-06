@@ -6,9 +6,17 @@ import { SchedulerModule } from '../scheduler/scheduler.module';
 import { BrowserModule } from '../browser/browser.module';
 import { MemoryModule } from '../memory/memory.module';
 import { UsageModule } from '../usage/usage.module';
+import { CoderModule } from '../coder/coder.module';
 
 @Module({
-  imports: [LoggerModule, forwardRef(() => SchedulerModule), BrowserModule, MemoryModule, UsageModule],
+  imports: [
+    LoggerModule,
+    forwardRef(() => SchedulerModule),
+    BrowserModule,
+    MemoryModule,
+    UsageModule,
+    forwardRef(() => CoderModule),
+  ],
   providers: [AgentService, ToolsService],
   exports: [AgentService],
 })

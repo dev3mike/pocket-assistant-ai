@@ -3,7 +3,9 @@
  * updateProfile, createSchedule, listSchedules, cancelSchedule, httpRequest, and executeBrowserTask.
  * When the main agent calls executeBrowserTask(task), this service invokes the
  * Browser Agent (BrowserAgentService) and returns summary + screenshots as a
- * content_and_artifact ToolMessage. httpRequest performs curl-like HTTP calls (method, url, headers, query params, body).
+ * content_and_artifact ToolMessage. When the main agent calls executeCoderTask(task),
+ * this service starts the Coder Agent in the background and returns immediately;
+ * progress is sent to the user via Telegram. httpRequest performs curl-like HTTP calls.
  * Does not run any agent loop itself.
  */
 import { Injectable, Logger } from '@nestjs/common';
@@ -14,6 +16,8 @@ import { SoulService } from '../soul/soul.service';
 import { AiService } from '../ai/ai.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
 import { BrowserAgentService } from '../browser/browser-agent.service';
+import { CoderAgentService } from '../coder/coder-agent.service';
+import { validateUrlForSsrf } from '../utils/input-sanitizer';
 import * as z from 'zod';
 
 @Injectable()
@@ -27,6 +31,7 @@ export class ToolsService {
     private readonly aiService: AiService,
     private readonly schedulerService: SchedulerService,
     private readonly browserAgentService: BrowserAgentService,
+    private readonly coderAgentService: CoderAgentService,
   ) { }
 
   /**
@@ -51,6 +56,7 @@ export class ToolsService {
       listSchedules: this.createListSchedulesTool(chatId),
       cancelSchedule: this.createCancelScheduleTool(chatId),
       executeBrowserTask: this.createExecuteBrowserTaskTool(chatId),
+      executeCoderTask: this.createExecuteCoderTaskTool(chatId),
       httpRequest: this.createHttpRequestTool(chatId),
     };
   }
@@ -353,7 +359,7 @@ Use maxExecutions to limit how many times a recurring task runs (e.g., 10 for "r
       },
       {
         name: 'listSchedules',
-        description: 'List all active scheduled tasks and reminders for the user. Use this when the user wants to see their scheduled items.',
+        description: 'List all active scheduled tasks and reminders for this user (reads from storage). ALWAYS call this when the user asks about current/active schedules (e.g. "any 8am task?", "what\'s scheduled?", "are there any?", "what about now?" in schedule context). Do not answer from conversation memory—always use this tool to get the current list.',
       },
     );
   }
@@ -406,6 +412,13 @@ Use maxExecutions to limit how many times a recurring task runs (e.g., 10 for "r
         body?: string | Record<string, unknown>;
       }) => {
         try {
+          // SSRF protection: validate URL before making request
+          const ssrfError = validateUrlForSsrf(input.url);
+          if (ssrfError) {
+            this.agentLogger.warn(LogEvent.TOOL_ERROR, `httpRequest blocked: ${ssrfError}`, { chatId });
+            return `Error: ${ssrfError}`;
+          }
+
           const url = new URL(input.url);
           if (input.queryParams && Object.keys(input.queryParams).length > 0) {
             for (const [key, value] of Object.entries(input.queryParams)) {
@@ -542,6 +555,85 @@ Examples (browser explicitly requested):
 - User says "use the browser to go to example.com" → task: "go to example.com"`,
         schema: z.object({
           task: z.string().describe('The EXACT browser task as stated by the user. Do not add or interpret - pass exactly what was requested.'),
+        }),
+      },
+    );
+  }
+
+  // ===== Coder Tools =====
+
+  private createExecuteCoderTaskTool(chatId: string) {
+    return tool(
+      async (input: { task: string; runInBackground?: boolean }): Promise<string> => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Coder task: ${input.task.slice(0, 80)}...`, { chatId });
+
+        // If explicitly requested to run in background, use the old async method
+        if (input.runInBackground) {
+          this.coderAgentService.runInBackground(chatId, input.task);
+          this.agentLogger.info(LogEvent.TOOL_RESULT, 'Coder task started in background', { chatId });
+          return "I've started your coding task in the background. You'll receive updates as it progresses.";
+        }
+
+        // Run synchronously and return the result to the main agent
+        try {
+          const result = await this.coderAgentService.executeTask(chatId, input.task);
+
+          this.agentLogger.info(
+            result.success ? LogEvent.TOOL_RESULT : LogEvent.TOOL_ERROR,
+            `Coder task ${result.success ? 'completed' : 'failed'}: ${result.stepsCompleted.length} steps`,
+            { chatId },
+          );
+
+          // Format the result for the main agent
+          let response = '';
+
+          if (result.success) {
+            response = `✅ Coding task completed.\n\n**Project:** ${result.projectFolder}\n\n`;
+
+            if (result.stepsCompleted.length > 0) {
+              response += `**Steps completed:**\n`;
+              // Show last 5 steps to keep it concise
+              const recentSteps = result.stepsCompleted.slice(-5);
+              for (const step of recentSteps) {
+                response += `• ${step}\n`;
+              }
+              if (result.stepsCompleted.length > 5) {
+                response += `  ... and ${result.stepsCompleted.length - 5} more steps\n`;
+              }
+            }
+
+            response += `\n**Summary:**\n${result.summary}`;
+
+            // If the coder agent has a question, indicate it
+            if (result.hasQuestion) {
+              response += `\n\n⚠️ **The coder agent needs clarification.** Please address the question above and provide more details.`;
+            }
+          } else {
+            response = `❌ Coding task failed.\n\n**Project:** ${result.projectFolder}\n\n`;
+            if (result.error) {
+              response += `**Error:** ${result.error}\n\n`;
+            }
+            if (result.stepsCompleted.length > 0) {
+              response += `**Steps completed before failure:**\n`;
+              for (const step of result.stepsCompleted.slice(-3)) {
+                response += `• ${step}\n`;
+              }
+            }
+          }
+
+          return response;
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          this.agentLogger.error(LogEvent.TOOL_ERROR, `Coder task failed: ${errorMsg}`, { chatId });
+          return `Coding task failed: ${errorMsg}`;
+        }
+      },
+      {
+        name: 'executeCoderTask',
+        description: `Run a coding task. Use when the user asks to: clone a git repo, view or edit files, write code, review files or a GitHub PR, run commands in a project, commit, push, or any coding-related work. The task runs and returns the result so you can respond to the user with what was done. Pass the user's request as the task (you may summarize or clarify if needed). Set runInBackground=true only for very long tasks where the user explicitly asks for background execution.`,
+        schema: z.object({
+          task: z.string().describe('The coding task as requested by the user (e.g. "clone https://github.com/foo/bar and add a README")'),
+          runInBackground: z.boolean().optional().describe('Set to true to run in background for very long tasks (default: false, runs synchronously and returns result)'),
         }),
       },
     );
