@@ -18,10 +18,11 @@ export class TelegramMessagingService implements IMessagingService {
     options?: MessageOptions,
   ): Promise<MessageSendResult> {
     try {
-      const success = await this.telegramService.sendMessage(recipientId, text);
+      const messageId = await this.telegramService.sendMessage(recipientId, text);
       return {
-        success,
-        error: success ? undefined : 'Failed to send message',
+        success: messageId !== null,
+        messageId: messageId !== null ? String(messageId) : undefined,
+        error: messageId !== null ? undefined : 'Failed to send message',
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -130,6 +131,15 @@ export class TelegramMessagingService implements IMessagingService {
 
   supportsMessageUpdate(): boolean {
     return true;
+  }
+
+  async deleteMessage(recipientId: string, messageId: string): Promise<boolean> {
+    try {
+      return await this.telegramService.deleteMessage(recipientId, parseInt(messageId, 10));
+    } catch (error) {
+      // Silently fail - message might already be deleted
+      return false;
+    }
   }
 
   getChannelType(): string {

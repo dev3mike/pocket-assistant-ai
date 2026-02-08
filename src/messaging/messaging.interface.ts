@@ -103,6 +103,13 @@ export interface IMessagingService {
   supportsMessageUpdate?(): boolean;
 
   /**
+   * Delete a message
+   * @param recipientId - The recipient identifier
+   * @param messageId - The ID of the message to delete
+   */
+  deleteMessage?(recipientId: string, messageId: string): Promise<boolean>;
+
+  /**
    * Get the channel type identifier
    */
   getChannelType(): string;
