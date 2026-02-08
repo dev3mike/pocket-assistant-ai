@@ -170,32 +170,23 @@ Edit `data/config.json` to add your Telegram user ID (created on first run if mi
 ### Run
 
 ```bash
-# Development (with hot reload)
-npm run start:dev
-
-# Production
-npm run build
-npm run start:prod
+# Start the app (with hot reload)
+npm start
 ```
 
 ### Package scripts
 
 | Script | Description |
 |--------|-------------|
-| `npm run start` | Start the app with watch mode (hot reload) |
-| `npm run start:dev` | Same as `start` – development with watch mode |
-| `npm run start:prod` | Start the app (no watch; run after `build` for production) |
-| `npm run start:debug` | Start with Node inspector for debugging |
-| `npm run build` | Compile the NestJS app for production |
-| `npm run lint` | Run ESLint and fix issues |
-| `npm run format` | Format source with Prettier |
+| `npm start` | Start the app with watch mode (hot reload) |
+| `npm run build` | Compile the NestJS app |
 | `npm run browser` | Run the browser helper script (opens Playwright browser) |
 
 ---
 
 ## Docker
 
-Docker is used only to run **Langfuse** (LLM observability). Run the app locally with `npm run start:dev`.
+Docker is used only to run **Langfuse** (LLM observability). Run the app locally with `npm start`.
 
 ### Start Langfuse (optional)
 
@@ -274,7 +265,7 @@ LANGFUSE_HOST=https://cloud.langfuse.com
 
 #### Self-Hosted Langfuse
 
-The included `docker-compose.yml` runs only Langfuse (and its Postgres). Run the app with `npm run start:dev`.
+The included `docker-compose.yml` runs only Langfuse (and its Postgres). Run the app with `npm start`.
 
 ```bash
 docker compose up -d
