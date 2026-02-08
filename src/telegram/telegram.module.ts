@@ -8,6 +8,7 @@ import { SchedulerModule } from '../scheduler/scheduler.module';
 import { AiModule } from '../ai/ai.module';
 import { MemoryModule } from '../memory/memory.module';
 import { FileModule } from '../file/file.module';
+import { TranscriptionModule } from '../transcription/transcription.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { FileModule } from '../file/file.module';
     forwardRef(() => SchedulerModule),
     MemoryModule,
     FileModule,
+    TranscriptionModule,
   ],
   providers: [TelegramUpdate, TelegramService],
   exports: [TelegramService],

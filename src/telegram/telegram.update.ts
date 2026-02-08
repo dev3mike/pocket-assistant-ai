@@ -21,6 +21,7 @@ import { ProgressUpdate } from '../messaging/messaging.interface';
 import { FileService } from '../file/file.service';
 import { FileAnalyzerService } from '../file/file-analyzer.service';
 import { formatFileSize, categorizeFile } from '../file/file.types';
+import { TranscriptionService } from '../transcription/transcription.service';
 
 const UNAUTHORIZED_MESSAGE = `🚫 *Access Denied*
 
@@ -47,6 +48,7 @@ export class TelegramUpdate {
     private readonly memoryService: MemoryService,
     private readonly fileService: FileService,
     private readonly fileAnalyzer: FileAnalyzerService,
+    private readonly transcriptionService: TranscriptionService,
   ) { }
 
   /**
@@ -691,7 +693,9 @@ export class TelegramUpdate {
   }
 
   /**
-   * Handle voice messages
+   * Handle voice messages - transcribe and act upon them
+   * By default: transcribes the voice message and passes to the AI agent for action
+   * If user previously asked "transcribe this", just returns the transcription
    */
   @On('voice')
   async onVoice(@Ctx() ctx: Context) {
@@ -702,16 +706,225 @@ export class TelegramUpdate {
 
     if (!chatId || !message?.voice) return;
 
+    // Check if user has completed onboarding
+    if (!this.soulService.hasCompletedOnboarding(chatId)) {
+      await ctx.reply('Please complete the setup first by sending /start');
+      return;
+    }
+
+    // Check if transcription service is available
+    if (!this.transcriptionService.isAvailable()) {
+      await ctx.reply('Voice transcription is not available. Please configure GROQ_API_KEY.');
+      return;
+    }
+
     const voice = message.voice;
 
-    await this.handleIncomingFile(ctx, chatId, {
-      fileId: voice.file_id,
-      fileUniqueId: voice.file_unique_id,
-      fileSize: voice.file_size || 0,
-      fileName: `voice_${Date.now()}.ogg`,
-      mimeType: voice.mime_type || 'audio/ogg',
-      caption: '',
+    // Show typing indicator
+    await ctx.sendChatAction('typing');
+
+    try {
+      // Get file URL from Telegram
+      const fileLink = await ctx.telegram.getFileLink(voice.file_id);
+      const fileUrl = fileLink.href;
+
+      // Download voice file temporarily
+      const tempPath = await this.downloadVoiceFile(chatId, fileUrl, voice.file_id);
+
+      // Transcribe the voice message
+      const transcription = await this.transcriptionService.transcribe(tempPath);
+
+      // Clean up temp file
+      this.cleanupTempFile(tempPath);
+
+      if (!transcription.text || transcription.text.trim() === '') {
+        await ctx.reply("I couldn't understand the audio. Please try speaking more clearly.");
+        return;
+      }
+
+      // Check if user wants transcription only (check recent messages for intent)
+      const wantsTranscriptionOnly = await this.checkTranscriptionOnlyIntent(chatId);
+
+      if (wantsTranscriptionOnly) {
+        // Just return the transcription
+        const response = `*Transcription:*\n\n${transcription.text}`;
+        await this.sendWithMarkdown(ctx, response);
+
+        // Record in memory
+        await this.memoryService.addMessage(chatId, 'user', '[User sent a voice message asking for transcription]');
+        await this.memoryService.addMessage(chatId, 'assistant', response);
+        return;
+      }
+
+      // Default behavior: treat transcribed text as user input and process with agent
+      this.agentLogger.info(LogEvent.MESSAGE_RECEIVED, `Voice message transcribed: ${transcription.text.slice(0, 100)}...`, { chatId });
+
+      // Send initial "Thinking..." message for progress updates
+      const initialMsg = await ctx.reply(`*Voice transcribed:* "${transcription.text.slice(0, 100)}${transcription.text.length > 100 ? '...' : ''}"\n\n💭 Processing...`);
+      const messageId = initialMsg.message_id;
+
+      // Create progress callback that updates the message
+      const onProgress = (update: ProgressUpdate) => {
+        const indicators: Record<string, string> = {
+          thinking: '💭',
+          tool_start: '⚙️',
+          tool_progress: '🔄',
+          tool_complete: '✅',
+          error: '❌',
+        };
+        const indicator = indicators[update.type] || '•';
+        const progressText = `*Voice:* "${transcription.text.slice(0, 50)}..."\n\n${indicator} ${update.message}`;
+
+        this.telegramService.editMessage(chatId, messageId, progressText).catch(() => {});
+      };
+
+      // Keep typing indicator active for long operations
+      const typingInterval = setInterval(() => {
+        ctx.sendChatAction('typing').catch(() => {});
+      }, 4000);
+
+      try {
+        const { text: textResponse, screenshots: screenshotPaths } = await this.agentService.processMessage(
+          chatId,
+          `[Voice message transcription]: ${transcription.text}`,
+          onProgress,
+        );
+
+        clearInterval(typingInterval);
+
+        const textToSend = textResponse.trim() || "I didn't generate a response for that. Please try again.";
+
+        if (textToSend.length > 4000) {
+          const chunks = this.splitMessage(textToSend, 4000);
+          const editSuccess = await this.telegramService.editMessage(chatId, messageId, chunks[0], true);
+          if (!editSuccess) {
+            await this.sendWithMarkdown(ctx, chunks[0]);
+          }
+          for (let i = 1; i < chunks.length; i++) {
+            await this.sendWithMarkdown(ctx, chunks[i]);
+          }
+        } else {
+          const editSuccess = await this.telegramService.editMessage(chatId, messageId, textToSend, true);
+          if (!editSuccess) {
+            await this.sendWithMarkdown(ctx, textToSend);
+          }
+        }
+
+        if (screenshotPaths.length > 0) {
+          await this.telegramService.sendPhotos(chatId, screenshotPaths, '📸 Screenshot');
+        }
+      } catch (error) {
+        clearInterval(typingInterval);
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Error processing voice message for chat ${chatId}: ${errorMsg}`);
+        const errorText = '❌ Sorry, something went wrong processing your voice message.';
+        const editSuccess = await this.telegramService.editMessage(chatId, messageId, errorText, true);
+        if (!editSuccess) {
+          await ctx.reply(errorText);
+        }
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to transcribe voice message for ${chatId}: ${errorMsg}`);
+      await ctx.reply(`Sorry, I couldn't transcribe your voice message: ${errorMsg}`);
+    }
+  }
+
+  /**
+   * Download voice file to a temporary location
+   */
+  private async downloadVoiceFile(chatId: string, url: string, fileId: string): Promise<string> {
+    const fs = await import('fs');
+    const path = await import('path');
+    const https = await import('https');
+    const http = await import('http');
+
+    const tempDir = path.join(process.cwd(), 'data', chatId, 'temp');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+
+    const tempPath = path.join(tempDir, `voice_${fileId}.ogg`);
+
+    return new Promise((resolve, reject) => {
+      const protocol = url.startsWith('https') ? https : http;
+      const file = fs.createWriteStream(tempPath);
+
+      protocol.get(url, (response) => {
+        if (response.statusCode === 301 || response.statusCode === 302) {
+          const redirectUrl = response.headers.location;
+          if (redirectUrl) {
+            file.close();
+            fs.unlinkSync(tempPath);
+            this.downloadVoiceFile(chatId, redirectUrl, fileId).then(resolve).catch(reject);
+            return;
+          }
+        }
+
+        if (response.statusCode !== 200) {
+          file.close();
+          if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+          reject(new Error(`Download failed with status ${response.statusCode}`));
+          return;
+        }
+
+        response.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          resolve(tempPath);
+        });
+      }).on('error', (err) => {
+        file.close();
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+        reject(err);
+      });
     });
+  }
+
+  /**
+   * Clean up temporary voice file
+   */
+  private cleanupTempFile(filePath: string): void {
+    try {
+      const fs = require('fs');
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch (error) {
+      this.logger.warn(`Failed to cleanup temp file ${filePath}: ${error}`);
+    }
+  }
+
+  /**
+   * Check if the user's recent messages indicate they want transcription only
+   * (e.g., "transcribe this", "just transcribe", "transcription only")
+   */
+  private async checkTranscriptionOnlyIntent(chatId: string): Promise<boolean> {
+    const recentMessages = this.memoryService.getMessages(chatId);
+    if (recentMessages.length === 0) return false;
+
+    // Check the last few user messages for transcription-only intent
+    const lastMessages = recentMessages.slice(-3);
+    const transcriptionKeywords = [
+      'transcribe this',
+      'just transcribe',
+      'transcription only',
+      'transcribe it',
+      'transcribe the next',
+      'only transcribe',
+      'transcribe for me',
+    ];
+
+    for (const msg of lastMessages) {
+      if (msg.role === 'user') {
+        const lowerContent = msg.content.toLowerCase();
+        if (transcriptionKeywords.some(keyword => lowerContent.includes(keyword))) {
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 
   /**

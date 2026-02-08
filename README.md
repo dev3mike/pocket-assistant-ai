@@ -62,6 +62,12 @@ Unlike simple chatbots, Pocket Assistant uses a multi-agent architecture where s
 - Automatic cleanup of old schedules
 - Context-aware reminders
 
+### Voice Input
+- Send voice messages and the AI will transcribe and act on them
+- Powered by Groq's Whisper large-v3-turbo model
+- Say "transcribe this" before sending a voice message to get transcription only
+- Fast and accurate speech-to-text conversion
+
 ### HTTP Requests
 - Make API calls directly from chat
 - Support for all HTTP methods
@@ -209,6 +215,7 @@ docker build -t pocket-assistant-ai .
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from BotFather |
 | `OPENROUTER_API_KEY` | Yes | API key from OpenRouter |
+| `GROQ_API_KEY` | No | Groq API key for voice transcription |
 | `ZAPIER_MCP_TOKEN` | No | Zapier MCP integration token |
 | `LANGFUSE_PUBLIC_KEY` | No | Langfuse public key for observability |
 | `LANGFUSE_SECRET_KEY` | No | Langfuse secret key |
@@ -319,6 +326,20 @@ Bot: Starting coding task...
      Cloning repository...
      Creating README.md...
      Done! Created README.md with project description.
+```
+
+### Voice Input
+
+```
+You: [Send a voice message saying "What's the weather like today?"]
+Bot: Voice transcribed: "What's the weather like today?"
+     Processing...
+     [Bot responds to your question]
+
+You: Transcribe this for me
+You: [Send a voice message]
+Bot: Transcription:
+     [Your spoken words as text]
 ```
 
 ### API Calls

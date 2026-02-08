@@ -15,6 +15,7 @@ import { UsageModule } from './usage/usage.module';
 import { CoderModule } from './coder/coder.module';
 import { ModelModule } from './model/model.module';
 import { PromptModule } from './prompts/prompt.module';
+import { TranscriptionModule } from './transcription/transcription.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { PromptModule } from './prompts/prompt.module';
     SchedulerModule,
     BrowserModule,
     CoderModule,
+    TranscriptionModule,
   ],
   controllers: [AppController],
   providers: [AppService],
