@@ -7,7 +7,7 @@
 /**
  * Categories for long-term memory entries
  */
-export type MemoryCategory = 'fact' | 'preference' | 'decision' | 'context' | 'todo';
+export type MemoryCategory = 'fact' | 'preference' | 'decision' | 'context' | 'todo' | 'file';
 
 /**
  * Source of how a memory entry was created
@@ -24,6 +24,7 @@ export interface LongTermMemoryEntry {
   source: MemorySource;
   createdAt: string;
   tags?: string[];
+  metadata?: Record<string, any>; // Additional data (e.g., file info for 'file' category)
 }
 
 /**

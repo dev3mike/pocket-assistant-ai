@@ -14,10 +14,19 @@ import { LongTermMemoryService } from './longterm-memory.service';
 import { SemanticSearchService } from './semantic-search.service';
 import { MemorySearchResult, MemorySearchOptions } from './memory.types';
 
+export interface FileAttachment {
+  fileId: string;
+  fileName: string;
+  filePath: string;
+  mimeType: string;
+  size?: number;
+}
+
 export interface MemoryMessage {
   role: 'user' | 'assistant' | 'summary';
   content: string;
   timestamp: string;
+  attachments?: FileAttachment[]; // Optional file attachments for this message
 }
 
 export interface ChatMemory {
@@ -122,15 +131,31 @@ export class MemoryService {
   /**
    * Add a message to the chat memory
    * Automatically summarizes old messages if memory exceeds MAX_MESSAGES
+   * @param chatId - The chat ID
+   * @param role - The message role (user or assistant)
+   * @param content - The message content
+   * @param attachments - Optional file attachments associated with this message
    */
-  async addMessage(chatId: string, role: 'user' | 'assistant', content: string): Promise<void> {
+  async addMessage(
+    chatId: string,
+    role: 'user' | 'assistant',
+    content: string,
+    attachments?: FileAttachment[],
+  ): Promise<void> {
     const memory = this.loadMemoryForChat(chatId);
 
-    memory.messages.push({
+    const message: MemoryMessage = {
       role,
       content,
       timestamp: new Date().toISOString(),
-    });
+    };
+
+    // Add attachments if provided
+    if (attachments && attachments.length > 0) {
+      message.attachments = attachments;
+    }
+
+    memory.messages.push(message);
     memory.lastActivity = new Date().toISOString();
 
     // Check if we need to summarize old messages
