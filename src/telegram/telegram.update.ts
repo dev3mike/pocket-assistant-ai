@@ -8,6 +8,7 @@
 import { Logger } from '@nestjs/common';
 import { Update, Ctx, Start, Help, On, Command } from 'nestjs-telegraf';
 import { Context } from 'telegraf';
+import { Message } from 'telegraf/types';
 import { AgentService } from '../agent/agent.service';
 import { AgentLoggerService, LogEvent } from '../logger/agent-logger.service';
 import { SoulService } from '../soul/soul.service';
@@ -15,8 +16,11 @@ import { ConfigService } from '../config/config.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
 import { AiService } from '../ai/ai.service';
 import { TelegramService } from './telegram.service';
-import { MemoryService } from '../memory/memory.service';
+import { MemoryService, FileAttachment } from '../memory/memory.service';
 import { ProgressUpdate } from '../messaging/messaging.interface';
+import { FileService } from '../file/file.service';
+import { FileAnalyzerService } from '../file/file-analyzer.service';
+import { formatFileSize, categorizeFile } from '../file/file.types';
 
 const UNAUTHORIZED_MESSAGE = `🚫 *Access Denied*
 
@@ -41,6 +45,8 @@ export class TelegramUpdate {
     private readonly aiService: AiService,
     private readonly telegramService: TelegramService,
     private readonly memoryService: MemoryService,
+    private readonly fileService: FileService,
+    private readonly fileAnalyzer: FileAnalyzerService,
   ) { }
 
   /**
@@ -302,12 +308,18 @@ export class TelegramUpdate {
       return;
     }
 
-    const text = message.text;
+    let text = message.text;
     const chatIdStr = chatId.toString();
 
     // Ignore commands (they're handled by their respective decorators)
     if (text.startsWith('/')) {
       return;
+    }
+
+    // Check if this message is a reply to another message - add context
+    const replyContext = await this.extractReplyContext(ctx, chatIdStr);
+    if (replyContext) {
+      text = `[Replying to: ${replyContext}]\n\n${text}`;
     }
 
     // Check if user is in onboarding flow
@@ -370,15 +382,20 @@ export class TelegramUpdate {
       if (textToSend.length > 4000) {
         // For long responses, edit initial message with first chunk, then send rest
         const chunks = this.splitMessage(textToSend, 4000);
-        await this.telegramService.editMessage(chatIdStr, messageId, chunks[0]);
+        // Use fallback=true to ensure first chunk is always delivered
+        const editSuccess = await this.telegramService.editMessage(chatIdStr, messageId, chunks[0], true);
+        if (!editSuccess) {
+          // If edit+fallback both failed, try direct send
+          await this.sendWithMarkdown(ctx, chunks[0]);
+        }
         for (let i = 1; i < chunks.length; i++) {
           await this.sendWithMarkdown(ctx, chunks[i]);
         }
       } else {
-        // Replace progress message with final response
-        const editSuccess = await this.telegramService.editMessage(chatIdStr, messageId, textToSend);
+        // Replace progress message with final response (use fallback to ensure delivery)
+        const editSuccess = await this.telegramService.editMessage(chatIdStr, messageId, textToSend, true);
         if (!editSuccess) {
-          // Fallback to sending new message if edit fails
+          // If edit+fallback both failed, try direct send as last resort
           await this.sendWithMarkdown(ctx, textToSend);
         }
       }
@@ -392,8 +409,12 @@ export class TelegramUpdate {
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.logger.error(`Error processing message for chat ${chatId}: ${errorMsg}`);
 
-      // Update the progress message with error
-      await this.telegramService.editMessage(chatIdStr, messageId, '❌ Sorry, something went wrong. Please try again.');
+      // Update the progress message with error (use fallback to ensure delivery)
+      const errorText = '❌ Sorry, something went wrong. Please try again.';
+      const editSuccess = await this.telegramService.editMessage(chatIdStr, messageId, errorText, true);
+      if (!editSuccess) {
+        await ctx.reply(errorText);
+      }
     }
   }
 
@@ -470,5 +491,457 @@ export class TelegramUpdate {
     }
 
     return chunks;
+  }
+
+  /**
+   * Extract context from a reply-to message (if user is replying to a previous message)
+   * Returns a summary of what the user is replying to, including file info if applicable
+   */
+  private async extractReplyContext(ctx: Context, chatId: string): Promise<string | null> {
+    const message = ctx.message;
+    if (!message || !('reply_to_message' in message) || !message.reply_to_message) {
+      return null;
+    }
+
+    const replyTo = message.reply_to_message;
+    const parts: string[] = [];
+
+    // Check if replying to a text message
+    if ('text' in replyTo && replyTo.text) {
+      // Truncate long messages
+      const text = replyTo.text.length > 200 ? replyTo.text.slice(0, 200) + '...' : replyTo.text;
+      parts.push(`message: "${text}"`);
+    }
+
+    // Check if replying to a photo
+    if ('photo' in replyTo && replyTo.photo && replyTo.photo.length > 0) {
+      // Try to find the file in our storage by looking at recent files
+      const photo = replyTo.photo[replyTo.photo.length - 1];
+      const storedFile = this.fileService.getFileByTelegramId(chatId, photo.file_unique_id);
+      
+      if (storedFile) {
+        parts.push(`photo: "${storedFile.originalName}" (file ID: ${storedFile.id}, path: ${storedFile.localPath})`);
+        if (storedFile.memorized && storedFile.tags?.length) {
+          parts.push(`tags: ${storedFile.tags.join(', ')}`);
+        }
+      } else {
+        parts.push('a photo (not stored)');
+      }
+
+      // Include caption if present
+      if ('caption' in replyTo && replyTo.caption) {
+        parts.push(`caption: "${replyTo.caption}"`);
+      }
+    }
+
+    // Check if replying to a document
+    if ('document' in replyTo && replyTo.document) {
+      const doc = replyTo.document;
+      const storedFile = this.fileService.getFileByTelegramId(chatId, doc.file_unique_id);
+      
+      if (storedFile) {
+        parts.push(`document: "${storedFile.originalName}" (file ID: ${storedFile.id}, path: ${storedFile.localPath})`);
+      } else {
+        parts.push(`document: "${doc.file_name || 'unknown'}" (not stored)`);
+      }
+    }
+
+    // Check if replying to audio
+    if ('audio' in replyTo && replyTo.audio) {
+      const audio = replyTo.audio;
+      const storedFile = this.fileService.getFileByTelegramId(chatId, audio.file_unique_id);
+      
+      if (storedFile) {
+        parts.push(`audio: "${storedFile.originalName}" (file ID: ${storedFile.id})`);
+      } else {
+        parts.push(`audio: "${audio.file_name || 'unknown'}" (not stored)`);
+      }
+    }
+
+    // Check if replying to video
+    if ('video' in replyTo && replyTo.video) {
+      const video = replyTo.video;
+      const storedFile = this.fileService.getFileByTelegramId(chatId, video.file_unique_id);
+      
+      if (storedFile) {
+        parts.push(`video: "${storedFile.originalName}" (file ID: ${storedFile.id})`);
+      } else {
+        parts.push(`video: "${video.file_name || 'unknown'}" (not stored)`);
+      }
+    }
+
+    // Check if replying to voice
+    if ('voice' in replyTo && replyTo.voice) {
+      const voice = replyTo.voice;
+      const storedFile = this.fileService.getFileByTelegramId(chatId, voice.file_unique_id);
+      
+      if (storedFile) {
+        parts.push(`voice message (file ID: ${storedFile.id})`);
+      } else {
+        parts.push('voice message (not stored)');
+      }
+    }
+
+    if (parts.length === 0) {
+      return null;
+    }
+
+    return parts.join(', ');
+  }
+
+  /**
+   * Handle photo messages
+   */
+  @On('photo')
+  async onPhoto(@Ctx() ctx: Context) {
+    if (!(await this.checkAuthorization(ctx))) return;
+
+    const chatId = ctx.chat?.id?.toString();
+    const message = ctx.message as Message.PhotoMessage;
+
+    if (!chatId || !message?.photo) return;
+
+    // Get the largest photo size
+    const photo = message.photo[message.photo.length - 1];
+    const caption = message.caption || '';
+
+    await this.handleIncomingFile(ctx, chatId, {
+      fileId: photo.file_id,
+      fileUniqueId: photo.file_unique_id,
+      fileSize: photo.file_size || 0,
+      fileName: `photo_${Date.now()}.jpg`,
+      mimeType: 'image/jpeg',
+      caption,
+    });
+  }
+
+  /**
+   * Handle document messages
+   */
+  @On('document')
+  async onDocument(@Ctx() ctx: Context) {
+    if (!(await this.checkAuthorization(ctx))) return;
+
+    const chatId = ctx.chat?.id?.toString();
+    const message = ctx.message as Message.DocumentMessage;
+
+    if (!chatId || !message?.document) return;
+
+    const doc = message.document;
+    const caption = message.caption || '';
+
+    await this.handleIncomingFile(ctx, chatId, {
+      fileId: doc.file_id,
+      fileUniqueId: doc.file_unique_id,
+      fileSize: doc.file_size || 0,
+      fileName: doc.file_name || `document_${Date.now()}`,
+      mimeType: doc.mime_type || 'application/octet-stream',
+      caption,
+    });
+  }
+
+  /**
+   * Handle audio messages
+   */
+  @On('audio')
+  async onAudio(@Ctx() ctx: Context) {
+    if (!(await this.checkAuthorization(ctx))) return;
+
+    const chatId = ctx.chat?.id?.toString();
+    const message = ctx.message as Message.AudioMessage;
+
+    if (!chatId || !message?.audio) return;
+
+    const audio = message.audio;
+    const caption = message.caption || '';
+
+    await this.handleIncomingFile(ctx, chatId, {
+      fileId: audio.file_id,
+      fileUniqueId: audio.file_unique_id,
+      fileSize: audio.file_size || 0,
+      fileName: audio.file_name || `audio_${Date.now()}.mp3`,
+      mimeType: audio.mime_type || 'audio/mpeg',
+      caption,
+    });
+  }
+
+  /**
+   * Handle video messages
+   */
+  @On('video')
+  async onVideo(@Ctx() ctx: Context) {
+    if (!(await this.checkAuthorization(ctx))) return;
+
+    const chatId = ctx.chat?.id?.toString();
+    const message = ctx.message as Message.VideoMessage;
+
+    if (!chatId || !message?.video) return;
+
+    const video = message.video;
+    const caption = message.caption || '';
+
+    await this.handleIncomingFile(ctx, chatId, {
+      fileId: video.file_id,
+      fileUniqueId: video.file_unique_id,
+      fileSize: video.file_size || 0,
+      fileName: video.file_name || `video_${Date.now()}.mp4`,
+      mimeType: video.mime_type || 'video/mp4',
+      caption,
+    });
+  }
+
+  /**
+   * Handle voice messages
+   */
+  @On('voice')
+  async onVoice(@Ctx() ctx: Context) {
+    if (!(await this.checkAuthorization(ctx))) return;
+
+    const chatId = ctx.chat?.id?.toString();
+    const message = ctx.message as Message.VoiceMessage;
+
+    if (!chatId || !message?.voice) return;
+
+    const voice = message.voice;
+
+    await this.handleIncomingFile(ctx, chatId, {
+      fileId: voice.file_id,
+      fileUniqueId: voice.file_unique_id,
+      fileSize: voice.file_size || 0,
+      fileName: `voice_${Date.now()}.ogg`,
+      mimeType: voice.mime_type || 'audio/ogg',
+      caption: '',
+    });
+  }
+
+  /**
+   * Common handler for all incoming files
+   */
+  private async handleIncomingFile(
+    ctx: Context,
+    chatId: string,
+    fileInfo: {
+      fileId: string;
+      fileUniqueId: string;
+      fileSize: number;
+      fileName: string;
+      mimeType: string;
+      caption: string;
+    },
+  ) {
+    const { fileId, fileUniqueId, fileSize, fileName, mimeType, caption } = fileInfo;
+
+    // Check if user has completed onboarding
+    if (!this.soulService.hasCompletedOnboarding(chatId)) {
+      await ctx.reply('Please complete the setup first by sending /start');
+      return;
+    }
+
+    // Check if file already exists
+    const existing = this.fileService.getFileByTelegramId(chatId, fileUniqueId);
+    if (existing) {
+      const duplicateMessage = `I already have this file stored as "${existing.originalName}".`;
+      // Record both the user's attempt and our response
+      const userMessage = caption.trim()
+        ? `[User sent a file: "${fileName}" (duplicate)] ${caption}`
+        : `[User sent a file: "${fileName}" (duplicate)]`;
+      await this.memoryService.addMessage(chatId, 'user', userMessage);
+      await this.memoryService.addMessage(chatId, 'assistant', duplicateMessage);
+      await ctx.reply(duplicateMessage);
+      return;
+    }
+
+    // Check storage limits
+    const limitsCheck = this.fileService.checkStorageLimits(chatId, fileSize);
+    if (!limitsCheck.allowed) {
+      const limitMessage = limitsCheck.message || 'Storage limit reached.';
+      // Record the attempt and error
+      const userMessage = caption.trim()
+        ? `[User sent a file: "${fileName}" (rejected - storage limit)] ${caption}`
+        : `[User sent a file: "${fileName}" (rejected - storage limit)]`;
+      await this.memoryService.addMessage(chatId, 'user', userMessage);
+      await this.memoryService.addMessage(chatId, 'assistant', limitMessage);
+      await ctx.reply(limitMessage);
+      return;
+    }
+
+    // Check MIME type
+    if (!this.fileService.isAllowedMimeType(mimeType)) {
+      const typeMessage = `Sorry, I can't store ${mimeType} files. Supported: images, documents, audio, video.`;
+      // Record the attempt and error
+      const userMessage = caption.trim()
+        ? `[User sent a file: "${fileName}" (rejected - unsupported type)] ${caption}`
+        : `[User sent a file: "${fileName}" (rejected - unsupported type)]`;
+      await this.memoryService.addMessage(chatId, 'user', userMessage);
+      await this.memoryService.addMessage(chatId, 'assistant', typeMessage);
+      await ctx.reply(typeMessage);
+      return;
+    }
+
+    // Show processing indicator
+    await ctx.sendChatAction('upload_document');
+
+    try {
+      // Get file URL from Telegram
+      const fileLink = await ctx.telegram.getFileLink(fileId);
+      const fileUrl = fileLink.href;
+
+      // Download and store
+      const metadata = await this.fileService.downloadAndStore(
+        chatId,
+        fileId,
+        fileUniqueId,
+        fileUrl,
+        fileName,
+        mimeType,
+        fileSize,
+        caption,
+        ctx.message?.message_id,
+      );
+
+      const category = categorizeFile(mimeType);
+      const sizeStr = formatFileSize(metadata.size);
+
+      // Create file attachment metadata for memory
+      const fileAttachment: FileAttachment = {
+        fileId: metadata.id,
+        fileName: metadata.originalName,
+        filePath: metadata.localPath,
+        mimeType: metadata.mimeType,
+        size: metadata.size,
+      };
+
+      // If there's a caption, let agentService.processMessage handle memory recording
+      // to avoid duplicate user messages. Otherwise record here.
+      if (caption.trim()) {
+        // Show brief acknowledgment while processing
+        const processingMessage = `📁 File received: ${metadata.originalName}\nProcessing your message with the file...`;
+        await this.sendWithMarkdown(ctx, processingMessage);
+
+        // Don't record to memory here - processMessageWithFile -> agentService will handle it
+        // Process caption with file context (this will add messages to memory via agentService)
+        await this.processMessageWithFile(ctx, chatId, caption, metadata.id, metadata.localPath, mimeType);
+      } else {
+        // No caption - record user file upload and ask what to do
+        const userFileMessage = `[User sent a ${category} file: "${metadata.originalName}" (${sizeStr})]`;
+        await this.memoryService.addMessage(chatId, 'user', userFileMessage, [fileAttachment]);
+
+        // Build acknowledgment message
+        let ackMessage = `📁 File received!\n\n`;
+        ackMessage += `Name: ${metadata.originalName}\n`;
+        ackMessage += `Type: ${category}\n`;
+        ackMessage += `Size: ${sizeStr}\n`;
+        ackMessage += `\nWhat would you like me to do with this file?\n`;
+        ackMessage += `• "Analyze it" - Use AI to understand the content\n`;
+        ackMessage += `• "Memorize it as [description]" - Save for later reference\n`;
+        ackMessage += `• Or just tell me what you need!\n`;
+        ackMessage += `\nFile ID: ${metadata.id}`;
+
+        await this.sendWithMarkdown(ctx, ackMessage);
+
+        // Record the acknowledgment in memory
+        await this.memoryService.addMessage(chatId, 'assistant', ackMessage);
+      }
+
+      this.agentLogger.info(LogEvent.MESSAGE_RECEIVED, `File stored: ${fileName}`, { chatId });
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to store file for ${chatId}: ${errorMsg}`);
+      const errorResponse = `Sorry, I couldn't store that file: ${errorMsg}`;
+      // Record the failed attempt in memory (still record file info for context)
+      const userMessage = caption.trim()
+        ? `[User sent a file: "${fileName}" (storage failed)] ${caption}`
+        : `[User sent a file: "${fileName}" (storage failed)]`;
+      await this.memoryService.addMessage(chatId, 'user', userMessage);
+      await this.memoryService.addMessage(chatId, 'assistant', errorResponse);
+      await ctx.reply(errorResponse);
+    }
+  }
+
+  /**
+   * Process a message that includes a file (for multi-modal support)
+   */
+  private async processMessageWithFile(
+    ctx: Context,
+    chatId: string,
+    userMessage: string,
+    fileId: string,
+    _localPath: string, // Using fileService.getFilePath() instead
+    mimeType: string,
+  ) {
+    // Send initial "Thinking..." message for progress updates
+    const initialMsg = await ctx.reply('💭 Analyzing...');
+    const messageId = initialMsg.message_id;
+
+    // Create progress callback
+    const onProgress = (update: ProgressUpdate) => {
+      const indicators: Record<string, string> = {
+        thinking: '💭',
+        tool_start: '⚙️',
+        tool_progress: '🔄',
+        tool_complete: '✅',
+        error: '❌',
+      };
+      const indicator = indicators[update.type] || '•';
+      const progressText = `${indicator} ${update.message}`;
+
+      this.telegramService.editMessage(chatId, messageId, progressText).catch(() => { });
+    };
+
+    // Keep typing indicator active
+    const typingInterval = setInterval(() => {
+      ctx.sendChatAction('typing').catch(() => { });
+    }, 4000);
+
+    try {
+      // Build attached files array for multi-modal processing
+      const filePath = this.fileService.getFilePath(chatId, fileId);
+      const attachedFiles = filePath
+        ? [{ id: fileId, path: filePath, mimeType }]
+        : [];
+
+      const { text: textResponse, screenshots } = await this.agentService.processMessage(
+        chatId,
+        userMessage,
+        onProgress,
+        attachedFiles,
+      );
+
+      clearInterval(typingInterval);
+
+      const textToSend = textResponse.trim() || "I've processed your file.";
+
+      if (textToSend.length > 4000) {
+        const chunks = this.splitMessage(textToSend, 4000);
+        // Use fallback=true to ensure first chunk is always delivered
+        const editSuccess = await this.telegramService.editMessage(chatId, messageId, chunks[0], true);
+        if (!editSuccess) {
+          await this.sendWithMarkdown(ctx, chunks[0]);
+        }
+        for (let i = 1; i < chunks.length; i++) {
+          await this.sendWithMarkdown(ctx, chunks[i]);
+        }
+      } else {
+        // Use fallback=true to ensure response is always delivered
+        const editSuccess = await this.telegramService.editMessage(chatId, messageId, textToSend, true);
+        if (!editSuccess) {
+          await this.sendWithMarkdown(ctx, textToSend);
+        }
+      }
+
+      if (screenshots.length > 0) {
+        await this.telegramService.sendPhotos(chatId, screenshots, '📸 Screenshot');
+      }
+    } catch (error) {
+      clearInterval(typingInterval);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Error processing file message for ${chatId}: ${errorMsg}`);
+      // Use fallback to ensure error message is delivered
+      const errorText = '❌ Sorry, something went wrong.';
+      const editSuccess = await this.telegramService.editMessage(chatId, messageId, errorText, true);
+      if (!editSuccess) {
+        await ctx.reply(errorText);
+      }
+    }
   }
 }

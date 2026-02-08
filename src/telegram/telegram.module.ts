@@ -7,6 +7,7 @@ import { SoulModule } from '../soul/soul.module';
 import { SchedulerModule } from '../scheduler/scheduler.module';
 import { AiModule } from '../ai/ai.module';
 import { MemoryModule } from '../memory/memory.module';
+import { FileModule } from '../file/file.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { MemoryModule } from '../memory/memory.module';
     AiModule,
     forwardRef(() => SchedulerModule),
     MemoryModule,
+    FileModule,
   ],
   providers: [TelegramUpdate, TelegramService],
   exports: [TelegramService],
