@@ -205,4 +205,42 @@ export class ConfigService implements OnModuleInit, OnModuleDestroy {
     await this.saveConfig();
     this.logger.debug(`Coder active folder for ${chatId} set to ${folder}`);
   }
+
+  /**
+   * List all project folders under data/coder/
+   * Returns folder names with basic metadata (exists, has files)
+   */
+  async listCoderProjects(): Promise<Array<{ name: string; path: string }>> {
+    const coderDir = path.join(process.cwd(), 'data/coder');
+    try {
+      const exists = await fsPromises.access(coderDir).then(() => true).catch(() => false);
+      if (!exists) {
+        return [];
+      }
+      const entries = await fsPromises.readdir(coderDir, { withFileTypes: true });
+      const folders = entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => ({
+          name: entry.name,
+          path: path.join(coderDir, entry.name),
+        }));
+      return folders;
+    } catch (error) {
+      this.logger.warn(`Failed to list coder projects: ${error}`);
+      return [];
+    }
+  }
+
+  /**
+   * Check if a coder project folder exists
+   */
+  async coderProjectExists(folderName: string): Promise<boolean> {
+    const projectPath = path.join(process.cwd(), 'data/coder', folderName);
+    try {
+      const stat = await fsPromises.stat(projectPath);
+      return stat.isDirectory();
+    } catch {
+      return false;
+    }
+  }
 }
