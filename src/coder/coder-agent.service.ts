@@ -18,6 +18,7 @@ import {
 } from '@langchain/langgraph';
 import * as z from 'zod';
 import { CoderToolsService } from './coder-tools.service';
+import { ProcessManagerService } from './process-manager.service';
 import { IMessagingService, MESSAGING_SERVICE } from '../messaging/messaging.interface';
 import { Inject } from '@nestjs/common';
 import { UsageService } from '../usage/usage.service';
@@ -28,7 +29,20 @@ import { TraceService } from '../logger/trace.service';
 import { sanitize } from '../utils/input-sanitizer';
 
 const DEFAULT_PROJECT_FOLDER = 'default';
-const MAX_LLM_CALLS = 30;
+// Reduced from 30 - if the agent needs more than 15 LLM calls, something is wrong
+// This also limits auto-fix attempts since prompt tells it to stop on errors
+const MAX_LLM_CALLS = 15;
+// Threshold for sending progress updates to user (every N seconds)
+const PROGRESS_UPDATE_INTERVAL_MS = 5000;
+
+export interface RunningProcessInfo {
+  id: string;
+  command: string;
+  port?: number;
+  url?: string;
+  status: 'starting' | 'running' | 'stopped' | 'failed';
+  logs: string[];
+}
 
 export interface CoderTaskResult {
   success: boolean;
@@ -39,6 +53,7 @@ export interface CoderTaskResult {
   error?: string;
   hasQuestion?: boolean;
   question?: string;
+  runningProcesses?: RunningProcessInfo[];
 }
 
 @Injectable()
@@ -49,6 +64,7 @@ export class CoderAgentService implements OnModuleInit {
 
   constructor(
     private readonly coderTools: CoderToolsService,
+    private readonly processManager: ProcessManagerService,
     @Inject(MESSAGING_SERVICE)
     private readonly messagingService: IMessagingService,
     private readonly usageService: UsageService,
@@ -56,7 +72,7 @@ export class CoderAgentService implements OnModuleInit {
     private readonly modelFactory: ModelFactoryService,
     private readonly promptService: PromptService,
     private readonly traceService: TraceService,
-  ) {}
+  ) { }
 
   async onModuleInit() {
     if (!process.env.OPENROUTER_API_KEY) {
@@ -71,19 +87,147 @@ export class CoderAgentService implements OnModuleInit {
 
   /**
    * Start the coder task in the background. Sends an immediate ack; progress and result are sent via messaging.
+   * Returns a promise that resolves with the task result for callers that want to wait.
    */
-  runInBackground(chatId: string, task: string): void {
-    this.messagingService
-      .sendMessage(chatId, "I've started your coding task. I'll send you updates here as I go.")
-      .catch((err) => this.logger.warn(`Failed to send ack to ${chatId}: ${err}`));
+  runInBackground(chatId: string, task: string, skipAckMessage = false): Promise<CoderTaskResult> {
+    this.logger.log(`[${chatId}] Starting coder task in background: ${task.slice(0, 50)}...`);
+    
+    // Track the last status message ID so we can delete it before sending a new one
+    let lastStatusMessageId: string | undefined;
 
-    Promise.resolve()
-      .then(() => this.run(chatId, task, (msg) => this.messagingService.sendMessage(chatId, msg).then(() => {})))
+    // Send start message
+    this.messagingService
+      .sendMessage(chatId, `🔧 **Coding task started**\n\n_${task.slice(0, 150)}${task.length > 150 ? '...' : ''}_`)
+      .then((result) => {
+        if (result.messageId) lastStatusMessageId = result.messageId;
+        this.logger.debug(`[${chatId}] Sent coder start message`);
+      })
+      .catch((err) => this.logger.warn(`[${chatId}] Failed to send ack: ${err}`));
+
+    // Track progress for updates to user
+    let lastUpdateTime = 0; // Start at 0 to send first update immediately
+    let recentSteps: string[] = [];
+    let stepCount = 0;
+
+    const onProgress = (msg: string) => {
+      recentSteps.push(msg);
+      stepCount++;
+      this.logger.debug(`[${chatId}] Coder progress: ${msg}`);
+
+      // Send progress update to user:
+      // 1. Every PROGRESS_UPDATE_INTERVAL_MS (5 seconds)
+      // 2. OR immediately for important events
+      const now = Date.now();
+      const isImportantEvent = 
+        msg.startsWith('Running:') || 
+        msg.startsWith('Starting') ||
+        msg.includes('Error') || 
+        msg.includes('error') || 
+        msg.includes('Written') ||
+        msg.includes('Cloning') ||
+        msg.includes('Installing') ||
+        msg.includes('Command completed') ||
+        msg.includes('Command failed') ||
+        msg.startsWith('Using project') ||
+        msg.startsWith('⚠️');
+      const timeForUpdate = now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS;
+      
+      if (isImportantEvent || timeForUpdate) {
+        lastUpdateTime = now;
+        
+        // Delete previous status message before sending new one
+        if (lastStatusMessageId && this.messagingService.deleteMessage) {
+          this.messagingService.deleteMessage(chatId, lastStatusMessageId).catch(() => {});
+        }
+        
+        // Send progress with step count and recent steps
+        const stepsDisplay = recentSteps.slice(-4).map(s => `• ${s}`).join('\n');
+        const progressMsg = `🔄 **Coding...** (step ${stepCount})\n\n${stepsDisplay}`;
+        this.messagingService.sendMessage(chatId, progressMsg)
+          .then((result) => {
+            if (result.messageId) lastStatusMessageId = result.messageId;
+            this.logger.debug(`[${chatId}] Sent progress update`);
+          })
+          .catch((err) => this.logger.warn(`[${chatId}] Failed to send progress: ${err}`));
+        recentSteps = []; // Reset after sending
+      }
+    };
+
+    return this.run(chatId, task, onProgress)
+      .then((result) => {
+        // Delete last status message before sending final result
+        if (lastStatusMessageId && this.messagingService.deleteMessage) {
+          this.messagingService.deleteMessage(chatId, lastStatusMessageId).catch(() => {});
+        }
+        // Send final result to user
+        const resultMsg = this.formatResultForUser(result);
+        this.messagingService.sendMessage(chatId, resultMsg).catch(() => { });
+        return result;
+      })
       .catch((error: unknown) => {
+        // Delete last status message before sending error
+        if (lastStatusMessageId && this.messagingService.deleteMessage) {
+          this.messagingService.deleteMessage(chatId, lastStatusMessageId).catch(() => {});
+        }
         const errMsg = this.toErrorMessage(error);
         this.logger.error(`Coder task failed for ${chatId}: ${errMsg}`);
-        this.messagingService.sendMessage(chatId, `Coder task failed: ${errMsg}`).catch(() => {});
+        this.messagingService.sendMessage(chatId, `❌ Coder task failed: ${errMsg}`).catch(() => { });
+        return {
+          success: false,
+          task,
+          projectFolder: 'unknown',
+          summary: `Task failed: ${errMsg}`,
+          stepsCompleted: recentSteps,
+          error: errMsg,
+        };
       });
+  }
+
+  /**
+   * Format task result for display to user via Telegram
+   */
+  private formatResultForUser(result: CoderTaskResult): string {
+    if (result.success) {
+      let msg = `✅ **Coding task completed**\n\n`;
+      msg += `**Project:** ${result.projectFolder}\n`;
+
+      if (result.stepsCompleted.length > 0) {
+        msg += `\n**Steps (${result.stepsCompleted.length}):**\n`;
+        // Show last 5 steps
+        const recentSteps = result.stepsCompleted.slice(-5);
+        for (const step of recentSteps) {
+          msg += `• ${step}\n`;
+        }
+        if (result.stepsCompleted.length > 5) {
+          msg += `_... and ${result.stepsCompleted.length - 5} more_\n`;
+        }
+      }
+
+      msg += `\n**Summary:**\n${result.summary.slice(0, 1000)}${result.summary.length > 1000 ? '...' : ''}`;
+
+      if (result.runningProcesses && result.runningProcesses.length > 0) {
+        msg += `\n\n**Running Processes:**\n`;
+        for (const proc of result.runningProcesses) {
+          const portInfo = proc.port ? ` (port ${proc.port})` : '';
+          msg += `• ${proc.command}${portInfo} [${proc.status}]\n`;
+        }
+      }
+
+      return msg;
+    } else {
+      let msg = `❌ **Coding task failed**\n\n`;
+      msg += `**Project:** ${result.projectFolder}\n`;
+      if (result.error) {
+        msg += `**Error:** ${result.error}\n`;
+      }
+      if (result.stepsCompleted.length > 0) {
+        msg += `\n**Steps before failure:**\n`;
+        for (const step of result.stepsCompleted.slice(-3)) {
+          msg += `• ${step}\n`;
+        }
+      }
+      return msg;
+    }
   }
 
   private toErrorMessage(e: unknown): string {
@@ -94,87 +238,159 @@ export class CoderAgentService implements OnModuleInit {
   }
 
   /**
-   * Return true if the task clearly asks for a new/different project (clone URL, "new folder", etc.).
+   * Use LLM to intelligently determine the project folder for a task.
+   * Given the current folder (if any) and the task, the LLM decides whether to:
+   * - Continue in the current folder
+   * - Switch to a different existing folder
+   * - Create a new folder
+   *
+   * This approach works in any language and handles nuanced requests.
    */
-  private taskAsksForNewProject(task: string): boolean {
-    const lower = task.toLowerCase().trim();
-    if (/clone\s+https?:\/\//i.test(lower) || /clone\s+[^\s]+\/[^\s]+/.test(lower)) return true;
-    if (/\bnew\s+folder\b|\bnew\s+project\b|\bin\s+a\s+new\s+folder\b|\bdifferent\s+project\b|\bstart\s+(a\s+)?new\b|\bfresh\s+project\b/i.test(lower)) return true;
-    return false;
-  }
-
-  /**
-   * Ask the LLM for the project folder name under data/coder/ based on the user task.
-   * Returns a safe folder name (alphanumeric, hyphen, underscore only); falls back to "default" on error.
-   */
-  private async askLLMForProjectFolder(task: string, chatId?: string): Promise<string> {
+  private async resolveProjectFolder(chatId: string, task: string): Promise<string> {
     if (!this.model) return DEFAULT_PROJECT_FOLDER;
+
+    const currentFolder = this.configService.getCoderActiveFolder(chatId);
+
     try {
-      const response = await this.model.invoke([
-        new SystemMessage(
-          `You are a helper. Given the user's coding task, output ONLY the name of the project folder to use under data/coder/.
+      const systemPrompt = `You are a project folder resolver. Given a coding task and the current active project folder (if any), determine which project folder should be used.
+
+RESPOND WITH ONLY ONE LINE in this exact format:
+FOLDER: <folder-name>
 
 Rules:
-- Output a single folder name: lowercase letters, numbers, hyphens, or underscores (e.g. default, my-app, test-api, express-server).
-- If the task mentions cloning a repo, use the repo name as the folder (e.g. github.com/foo/test-api -> test-api).
-- If the task mentions a project or folder name, use that.
-- If unclear or generic, use "default".
-- No explanation, no quotes, no path – just the folder name.`,
-        ),
-        new HumanMessage(task.slice(0, 1500)),
+1. If the task asks to CREATE a new project, initialize something new, clone a repo, or explicitly names a new project → use that new project name
+2. If the task mentions working on a SPECIFIC project by name → use that project name
+3. If the task is clearly about CONTINUING work on the current project (bug fixes, adding features, editing files) → use the current folder
+4. If there's no current folder and the task is generic → use "default"
+
+Folder name format: lowercase letters, numbers, hyphens, or underscores only (e.g., my-app, test-api, ai-daily)
+
+Examples:
+- Task: "create a new react project called my-app" → FOLDER: my-app
+- Task: "name it ai-daily" with any context about creating → FOLDER: ai-daily
+- Task: "fix the bug in the login component" (current: my-app) → FOLDER: my-app
+- Task: "clone https://github.com/user/cool-project" → FOLDER: cool-project
+- Task: "switch to the test-api project" → FOLDER: test-api
+- Task: "add a README file" (current: my-app) → FOLDER: my-app
+- Task: "بساز یک پروژه جدید به نام shop-app" → FOLDER: shop-app`;
+
+      const userPrompt = currentFolder
+        ? `Current active folder: "${currentFolder}"\n\nTask: ${task.slice(0, 1500)}`
+        : `No current active folder.\n\nTask: ${task.slice(0, 1500)}`;
+
+      const response = await this.model.invoke([
+        new SystemMessage(systemPrompt),
+        new HumanMessage(userPrompt),
       ]);
-      const raw = typeof response.content === 'string' ? response.content : String(response.content ?? '');
-      const trimmed = raw.trim();
-      const tokens = trimmed.split(/\s+/);
-      const folderToken = tokens.find((t) => /^[a-z0-9_.-]+$/i.test(t) && t.length > 1);
-      const fromMatch = trimmed.match(/[a-z0-9][a-z0-9_.-]*/gi);
-      const bestMatch = fromMatch?.sort((a, b) => b.length - a.length)[0];
-      const safe = (folderToken || bestMatch || DEFAULT_PROJECT_FOLDER).toLowerCase();
+
       if (AIMessage.isInstance(response) && chatId) {
         this.usageService.recordUsageFromResponse(chatId, response);
       }
-      return safe || DEFAULT_PROJECT_FOLDER;
+
+      const raw = typeof response.content === 'string' ? response.content : String(response.content ?? '');
+
+      // Extract folder name from "FOLDER: xxx" format
+      const folderMatch = raw.match(/FOLDER:\s*([a-z0-9_.-]+)/i);
+      let folder = folderMatch?.[1]?.toLowerCase();
+
+      // Fallback: try to extract any valid folder name from the response
+      if (!folder) {
+        const anyMatch = raw.match(/[a-z][a-z0-9_.-]*/gi);
+        folder = anyMatch?.find((m) => m.length > 1 && m !== 'folder')?.toLowerCase();
+      }
+
+      folder = folder || currentFolder || DEFAULT_PROJECT_FOLDER;
+
+      // Save the resolved folder
+      this.configService.setCoderActiveFolder(chatId, folder).catch(() => { });
+      this.logger.debug(`Resolved project folder: ${folder} (was: ${currentFolder || 'none'})`);
+
+      return folder;
     } catch (e) {
       this.logger.warn(`LLM folder resolution failed: ${e}`);
-      return DEFAULT_PROJECT_FOLDER;
+      const fallback = currentFolder || DEFAULT_PROJECT_FOLDER;
+      this.configService.setCoderActiveFolder(chatId, fallback).catch(() => { });
+      return fallback;
     }
-  }
-
-  /**
-   * Resolve project folder: use stored folder for this chat unless the task asks for a new project,
-   * otherwise ask the LLM for the folder name based on the task.
-   */
-  private async resolveProjectFolder(chatId: string, task: string): Promise<string> {
-    let folder: string;
-
-    if (this.taskAsksForNewProject(task)) {
-      folder = await this.askLLMForProjectFolder(task, chatId);
-    } else {
-      const stored = this.configService.getCoderActiveFolder(chatId);
-      if (stored) folder = stored;
-      else folder = await this.askLLMForProjectFolder(task, chatId);
-    }
-
-    this.configService.setCoderActiveFolder(chatId, folder).catch(() => {});
-    return folder;
   }
 
   /**
    * Execute a coder task synchronously and return the result.
    * This allows the main agent to receive the result and respond accordingly.
+   * Also sends progress updates to the user via messaging.
    */
   async executeTask(chatId: string, task: string): Promise<CoderTaskResult> {
     const stepsCompleted: string[] = [];
+    let lastUpdateTime = 0; // Start at 0 to send first update immediately
+    let recentSteps: string[] = [];
+    let stepCount = 0;
+    
+    // Track the last status message ID so we can delete it before sending a new one
+    let lastStatusMessageId: string | undefined;
+
+    // Send initial message
+    const startResult = await this.messagingService
+      .sendMessage(chatId, `🔧 **Coding task started**\n\n_${task.slice(0, 150)}${task.length > 150 ? '...' : ''}_`)
+      .catch((err) => {
+        this.logger.warn(`[${chatId}] Failed to send start message: ${err}`);
+        return { success: false } as { success: boolean; messageId?: string };
+      });
+    if (startResult.messageId) lastStatusMessageId = startResult.messageId;
 
     const onProgress = (message: string) => {
       stepsCompleted.push(message);
+      recentSteps.push(message);
+      stepCount++;
       this.logger.debug(`[${chatId}] Coder progress: ${message}`);
+
+      // Send progress updates to user
+      const now = Date.now();
+      const isImportantEvent = 
+        message.startsWith('Running:') || 
+        message.startsWith('Starting') ||
+        message.includes('Error') || 
+        message.includes('error') || 
+        message.includes('Written') ||
+        message.includes('Cloning') ||
+        message.includes('Installing') ||
+        message.includes('Command completed') ||
+        message.includes('Command failed') ||
+        message.startsWith('Using project') ||
+        message.startsWith('⚠️');
+      const timeForUpdate = now - lastUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS;
+      
+      if (isImportantEvent || timeForUpdate) {
+        lastUpdateTime = now;
+        
+        // Delete previous status message before sending new one
+        if (lastStatusMessageId && this.messagingService.deleteMessage) {
+          this.messagingService.deleteMessage(chatId, lastStatusMessageId).catch(() => {});
+        }
+        
+        const stepsDisplay = recentSteps.slice(-4).map(s => `• ${s}`).join('\n');
+        const progressMsg = `🔄 **Coding...** (step ${stepCount})\n\n${stepsDisplay}`;
+        this.messagingService.sendMessage(chatId, progressMsg)
+          .then((result) => {
+            if (result.messageId) lastStatusMessageId = result.messageId;
+            this.logger.debug(`[${chatId}] Sent progress update`);
+          })
+          .catch((err) => this.logger.warn(`[${chatId}] Failed to send progress: ${err}`));
+        recentSteps = [];
+      }
     };
 
     try {
       const result = await this.run(chatId, task, onProgress);
+      // Delete last status message - final result will be sent by main agent
+      if (lastStatusMessageId && this.messagingService.deleteMessage) {
+        this.messagingService.deleteMessage(chatId, lastStatusMessageId).catch(() => {});
+      }
       return result;
     } catch (error) {
+      // Delete last status message before returning error
+      if (lastStatusMessageId && this.messagingService.deleteMessage) {
+        this.messagingService.deleteMessage(chatId, lastStatusMessageId).catch(() => {});
+      }
       const errMsg = this.toErrorMessage(error);
       return {
         success: false,
@@ -233,6 +449,7 @@ Rules:
 
     const traceService = this.traceService;
 
+    // Simple state - just track messages and LLM calls
     const MessagesState = new StateSchema({
       messages: MessagesValue,
       llmCalls: new ReducedValue(z.number().default(0), { reducer: (x, y) => x + y }),
@@ -257,6 +474,7 @@ Rules:
         return { messages: [] };
       }
       const results: ToolMessage[] = [];
+
       for (const toolCall of lastMessage.tool_calls) {
         const toolSpanId = traceService.startSpan(`coder_tool:${toolCall.name}`, traceId, rootSpanId);
         const tool = toolsByName[toolCall.name];
@@ -277,10 +495,11 @@ Rules:
           stepsCompleted.push(stepMsg);
           traceService.endSpan(toolSpanId);
           const content = Array.isArray(observation) ? observation[0] : observation;
+          const contentStr = typeof content === 'string' ? content : JSON.stringify(content);
           results.push(
             new ToolMessage({
               tool_call_id: toolCall.id!,
-              content: typeof content === 'string' ? content : JSON.stringify(content),
+              content: contentStr,
             }),
           );
         } catch (error: unknown) {
@@ -297,6 +516,7 @@ Rules:
           );
         }
       }
+
       return { messages: results };
     };
 
@@ -329,6 +549,9 @@ Rules:
       // Check if the response is asking a question (coder agent needs clarification)
       const hasQuestion = this.responseContainsQuestion(summary);
 
+      // Collect running processes info
+      const runningProcesses = this.collectRunningProcesses();
+
       this.traceService.endSpan(rootSpanId, { stepsCompleted: stepsCompleted.length });
 
       return {
@@ -339,10 +562,15 @@ Rules:
         stepsCompleted,
         hasQuestion,
         question: hasQuestion ? summary : undefined,
+        runningProcesses: runningProcesses.length > 0 ? runningProcesses : undefined,
       };
     } catch (error) {
       const errMsg = this.toErrorMessage(error);
       this.traceService.endSpanWithError(rootSpanId, errMsg);
+
+      // Still collect running processes even on error
+      const runningProcesses = this.collectRunningProcesses();
+
       return {
         success: false,
         task,
@@ -350,8 +578,23 @@ Rules:
         summary: `Task failed: ${errMsg}`,
         stepsCompleted,
         error: errMsg,
+        runningProcesses: runningProcesses.length > 0 ? runningProcesses : undefined,
       };
     }
+  }
+
+  /**
+   * Collect info about all running processes for the result
+   */
+  private collectRunningProcesses(): RunningProcessInfo[] {
+    return this.processManager.listProcesses().map((p) => ({
+      id: p.id,
+      command: p.command,
+      port: p.port,
+      url: p.url,
+      status: p.status,
+      logs: p.logs.slice(-20), // Last 20 log lines - main agent can read and understand errors
+    }));
   }
 
   /**
