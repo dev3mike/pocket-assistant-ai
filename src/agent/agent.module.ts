@@ -8,6 +8,7 @@ import { MemoryModule } from '../memory/memory.module';
 import { UsageModule } from '../usage/usage.module';
 import { CoderModule } from '../coder/coder.module';
 import { StateModule } from '../state/state.module';
+import { FileModule } from '../file/file.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { StateModule } from '../state/state.module';
     UsageModule,
     forwardRef(() => CoderModule),
     StateModule,
+    FileModule,
   ],
   providers: [AgentService, ToolsService],
   exports: [AgentService],

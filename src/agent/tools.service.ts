@@ -11,7 +11,7 @@
  * State tools provide key-value storage for runtime data (e.g., previous values for comparisons).
  * Does not run any agent loop itself.
  */
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { tool } from '@langchain/core/tools';
 import { ConfigService } from '../config/config.service';
 import { AgentLoggerService, LogEvent } from '../logger/agent-logger.service';
@@ -22,6 +22,7 @@ import { BrowserAgentService } from '../browser/browser-agent.service';
 import { CoderAgentService } from '../coder/coder-agent.service';
 import { MemoryService } from '../memory/memory.service';
 import { StateService } from '../state/state.service';
+import { FileToolsService } from '../file/file-tools.service';
 import { MemoryCategory } from '../memory/memory.types';
 import { validateUrlForSsrf } from '../utils/input-sanitizer';
 import * as z from 'zod';
@@ -40,6 +41,8 @@ export class ToolsService {
     private readonly coderAgentService: CoderAgentService,
     private readonly memoryService: MemoryService,
     private readonly stateService: StateService,
+    @Inject(forwardRef(() => FileToolsService))
+    private readonly fileToolsService: FileToolsService,
   ) { }
 
   /**
@@ -55,6 +58,9 @@ export class ToolsService {
    * Get tools that require chat context (for updating user profile)
    */
   getToolsForChat(chatId: string): Record<string, any> {
+    // Get file tools for this chat
+    const fileTools = this.fileToolsService.getToolsForChat(chatId);
+
     return {
       ...this.getLocalTools(),
       getProfile: this.createGetProfileTool(chatId),
@@ -63,9 +69,12 @@ export class ToolsService {
       listSchedules: this.createListSchedulesTool(chatId),
       listInactiveSchedules: this.createListInactiveSchedulesTool(chatId),
       cancelSchedule: this.createCancelScheduleTool(chatId),
+      updateSchedule: this.createUpdateScheduleTool(chatId),
       reactivateSchedule: this.createReactivateScheduleTool(chatId),
       executeBrowserTask: this.createExecuteBrowserTaskTool(chatId),
       executeCoderTask: this.createExecuteCoderTaskTool(chatId),
+      listCoderProjects: this.createListCoderProjectsTool(chatId),
+      switchCoderProject: this.createSwitchCoderProjectTool(chatId),
       httpRequest: this.createHttpRequestTool(chatId),
       memorySearch: this.createMemorySearchTool(chatId),
       memorySave: this.createMemorySaveTool(chatId),
@@ -74,6 +83,8 @@ export class ToolsService {
       setState: this.createSetStateTool(chatId),
       deleteState: this.createDeleteStateTool(chatId),
       listState: this.createListStateTool(chatId),
+      // File management tools
+      ...fileTools,
     };
   }
 
@@ -439,6 +450,119 @@ User must say things like: "cancel", "remove", "delete", "stop", "turn off", "di
     );
   }
 
+  private createUpdateScheduleTool(chatId: string) {
+    return tool(
+      (input: {
+        jobId: string;
+        description?: string;
+        taskContext?: string;
+        executeAt?: string;
+        cronExpression?: string;
+        maxExecutions?: number;
+      }) => {
+        const job = this.schedulerService.getJob(input.jobId);
+
+        if (!job) {
+          return `Error: Schedule with ID "${input.jobId}" not found.`;
+        }
+
+        if (job.chatId !== chatId) {
+          return `Error: You don't have permission to update this schedule.`;
+        }
+
+        if (job.status !== 'active') {
+          return `Error: Cannot update a ${job.status} schedule. Only active schedules can be updated.`;
+        }
+
+        // Validate executeAt if provided
+        if (input.executeAt) {
+          const executeDate = new Date(input.executeAt);
+          if (isNaN(executeDate.getTime())) {
+            return `Error: Invalid executeAt date format. Please use ISO format (e.g., "2024-12-25T09:00:00").`;
+          }
+          if (executeDate <= new Date()) {
+            return 'Error: The scheduled time must be in the future.';
+          }
+        }
+
+        // Validate cronExpression if provided
+        if (input.cronExpression) {
+          const parts = input.cronExpression.trim().split(/\s+/);
+          if (parts.length !== 5) {
+            return 'Error: Invalid cron expression. Format: "minute hour dayOfMonth month dayOfWeek".';
+          }
+        }
+
+        const updates: {
+          description?: string;
+          taskContext?: string;
+          executeAt?: string;
+          cronExpression?: string;
+          maxExecutions?: number;
+        } = {};
+
+        if (input.description) updates.description = input.description;
+        if (input.taskContext) updates.taskContext = input.taskContext;
+        if (input.executeAt) updates.executeAt = input.executeAt;
+        if (input.cronExpression) updates.cronExpression = input.cronExpression;
+        if (input.maxExecutions !== undefined) updates.maxExecutions = input.maxExecutions;
+
+        if (Object.keys(updates).length === 0) {
+          return 'No updates provided. You can update: description, taskContext, executeAt, cronExpression, or maxExecutions.';
+        }
+
+        const updatedJob = this.schedulerService.updateJob(input.jobId, chatId, updates);
+
+        if (!updatedJob) {
+          return 'Error: Failed to update the schedule. Please check the provided values.';
+        }
+
+        this.agentLogger.info(LogEvent.TOOL_RESULT, `Schedule updated: ${input.jobId}`, { chatId });
+
+        let scheduleInfo = '';
+        if (updatedJob.scheduleType === 'once' && updatedJob.executeAt) {
+          scheduleInfo = `Scheduled for: ${new Date(updatedJob.executeAt).toLocaleString()}`;
+        } else if (updatedJob.cronExpression) {
+          scheduleInfo = `Recurring schedule: ${updatedJob.cronExpression}`;
+          if (updatedJob.maxExecutions) {
+            scheduleInfo += ` (${updatedJob.executionCount}/${updatedJob.maxExecutions} executions)`;
+          }
+        }
+
+        return `✅ Schedule updated successfully!\n\nID: ${updatedJob.id}\nDescription: ${updatedJob.description}\n${scheduleInfo}`;
+      },
+      {
+        name: 'updateSchedule',
+        description: `Update an existing active schedule without canceling and recreating it. Use when the user wants to:
+- Change the description or task content of an existing schedule
+- Change the timing (executeAt or cronExpression)
+- Modify the max executions limit
+
+This is more efficient than canceling and creating a new schedule because:
+- It preserves the schedule's history/memory (previous executions)
+- It keeps the same job ID
+- It's a single operation
+
+**EXPLICIT REQUEST REQUIRED:**
+User must explicitly ask to update/modify/change a schedule.
+
+**When to use updateSchedule vs cancel+create:**
+- User says "change the time of my reminder" → updateSchedule
+- User says "make the poem schedule run at 9am instead" → updateSchedule
+- User says "update the bitcoin check to run every hour" → updateSchedule
+- User says "cancel that and create a new one" → cancel + create`,
+        schema: z.object({
+          jobId: z.string().describe('The ID of the schedule to update (get this from listSchedules)'),
+          description: z.string().optional().describe('New description for the schedule'),
+          taskContext: z.string().optional().describe('New task context/instructions for the schedule'),
+          executeAt: z.string().optional().describe('New execution time for one-time schedules (ISO format). This will convert a recurring schedule to one-time.'),
+          cronExpression: z.string().optional().describe('New cron expression for recurring schedules (e.g., "0 9 * * *"). This will convert a one-time schedule to recurring.'),
+          maxExecutions: z.number().optional().describe('New maximum number of executions for recurring tasks'),
+        }),
+      },
+    );
+  }
+
   private createListInactiveSchedulesTool(chatId: string) {
     return tool(
       () => {
@@ -685,17 +809,20 @@ Examples (browser explicitly requested):
 
   private createExecuteCoderTaskTool(chatId: string) {
     return tool(
-      async (input: { task: string; runInBackground?: boolean }): Promise<string> => {
+      async (input: { task: string; waitForResult?: boolean }): Promise<string> => {
         this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Coder task: ${input.task.slice(0, 80)}...`, { chatId });
 
-        // If explicitly requested to run in background, use the old async method
-        if (input.runInBackground) {
+        // By default, run async to avoid Telegram timeout (90s limit)
+        // Progress updates and final result will be sent to user via messaging
+        // Only wait for result if explicitly requested (for short tasks or chained operations)
+        if (!input.waitForResult) {
+          // Fire and forget - task runs in background, user gets updates via messaging
           this.coderAgentService.runInBackground(chatId, input.task);
-          this.agentLogger.info(LogEvent.TOOL_RESULT, 'Coder task started in background', { chatId });
-          return "I've started your coding task in the background. You'll receive updates as it progresses.";
+          this.agentLogger.info(LogEvent.TOOL_RESULT, 'Coder task started (async)', { chatId });
+          return `⚙️ Started coding task. The user will receive progress updates and the final result via message when complete.\n\nTask: ${input.task.slice(0, 200)}`;
         }
 
-        // Run synchronously and return the result to the main agent
+        // Wait for result (for short tasks or when chaining with browser tasks)
         try {
           const result = await this.coderAgentService.executeTask(chatId, input.task);
 
@@ -729,6 +856,28 @@ Examples (browser explicitly requested):
             if (result.hasQuestion) {
               response += `\n\n⚠️ **The coder agent needs clarification.** Please address the question above and provide more details.`;
             }
+
+            // Include running processes info for coordination with other tools
+            if (result.runningProcesses && result.runningProcesses.length > 0) {
+              response += `\n\n**Running Processes:**\n`;
+              for (const proc of result.runningProcesses) {
+                const portInfo = proc.port ? ` on port ${proc.port}` : '';
+                const urlInfo = proc.url ? ` (${proc.url})` : '';
+                response += `• Process ${proc.id}: ${proc.command}${portInfo}${urlInfo} [${proc.status}]\n`;
+
+                // Include recent logs so main agent can understand what happened (including any errors)
+                if (proc.logs.length > 0) {
+                  response += `  **Console output (last ${Math.min(proc.logs.length, 15)} lines):**\n`;
+                  for (const log of proc.logs.slice(-15)) {
+                    response += `    ${log}\n`;
+                  }
+                }
+              }
+              response += `\n💡 **IMPORTANT:** Review the console output above carefully for errors. If you see "Error", "error", "failed", stack traces, or warnings:\n`;
+              response += `   1. TELL THE USER about the error before proceeding\n`;
+              response += `   2. Offer to fix it\n`;
+              response += `   If taking a screenshot and it shows an error overlay, call executeCoderTask("show me the latest process logs") to see what went wrong.`;
+            }
           } else {
             response = `❌ Coding task failed.\n\n**Project:** ${result.projectFolder}\n\n`;
             if (result.error) {
@@ -738,6 +887,17 @@ Examples (browser explicitly requested):
               response += `**Steps completed before failure:**\n`;
               for (const step of result.stepsCompleted.slice(-3)) {
                 response += `• ${step}\n`;
+              }
+            }
+
+            // Still show running processes if any started before failure
+            if (result.runningProcesses && result.runningProcesses.length > 0) {
+              response += `\n**Running Processes (started before failure):**\n`;
+              for (const proc of result.runningProcesses) {
+                response += `• ${proc.id}: ${proc.command} [${proc.status}]\n`;
+                if (proc.logs.length > 0) {
+                  response += `  Last output: ${proc.logs.slice(-3).join(' | ')}\n`;
+                }
               }
             }
           }
@@ -751,10 +911,136 @@ Examples (browser explicitly requested):
       },
       {
         name: 'executeCoderTask',
-        description: `Run a coding task. Use when the user asks to: clone a git repo, view or edit files, write code, review files or a GitHub PR, run commands in a project, commit, push, or any coding-related work. The task runs and returns the result so you can respond to the user with what was done. Pass the user's request as the task (you may summarize or clarify if needed). Set runInBackground=true only for very long tasks where the user explicitly asks for background execution.`,
+        description: `Run a coding task. Use when the user asks to: clone a git repo, view or edit files, write code, review files or a GitHub PR, run commands in a project, start/stop dev servers, commit, push, or any coding-related work.
+
+**EXECUTION MODE:**
+By default, tasks run ASYNCHRONOUSLY - the user receives progress updates and the final result via messages.
+Set waitForResult=true ONLY when you need the result for a follow-up action (e.g., starting a server then taking a screenshot).
+
+**IMPORTANT - Project Folder Context:**
+The coder agent works in a specific project folder. Before running a task:
+
+1. **If the user mentions a specific project/folder by name** (e.g., "in my-app project", "switch to test-api"):
+   → Use switchCoderProject first to set the correct project, then run the task.
+
+2. **If the task seems unrelated to the current project context** (e.g., user asks about a React app but current project is a Python API):
+   → ASK the user: "I'm currently working in [project-name]. Would you like me to continue there, or switch to a different project?"
+
+3. **If the user asks a generic coding question** without specifying a project and you're unsure:
+   → Use listCoderProjects to show available options and ask which one to use.
+
+4. **For clone operations**: The coder automatically creates a new folder from the repo name.
+
+5. **For continuing work**: If the task clearly relates to the current project, proceed directly.
+
+**RUNNING SERVERS/DEV MODE:**
+The coder can start long-running processes (npm run dev, npm start, etc.). When a process is started:
+- The result will include the running process info (ID, port, URL, logs)
+- You can then use executeBrowserTask to visit the running app
+- Ask to stop the process when done
+
+**COORDINATED WORKFLOWS:**
+For "run the app and take a screenshot" type requests:
+1. First call executeCoderTask with waitForResult=true to start the app
+2. Check the result for runningProcesses with port/URL info - LOOK FOR ERRORS IN THE LOGS!
+3. Then call executeBrowserTask to visit that URL and take a screenshot
+4. **IMPORTANT:** If the screenshot shows an error overlay/message, call executeCoderTask("get the latest logs from running processes") to see what went wrong, then report to user.
+
+**ERROR HANDLING:**
+- ALWAYS carefully read the console logs in the response
+- If you see Error, error, failed, warning, or stack traces - TELL THE USER
+- Do NOT say "running successfully" if there are errors in the logs!`,
         schema: z.object({
-          task: z.string().describe('The coding task as requested by the user (e.g. "clone https://github.com/foo/bar and add a README")'),
-          runInBackground: z.boolean().optional().describe('Set to true to run in background for very long tasks (default: false, runs synchronously and returns result)'),
+          task: z.string().describe('The coding task as requested by the user (e.g. "clone https://github.com/foo/bar and add a README", "run npm run dev")'),
+          waitForResult: z.boolean().optional().describe('Set to true when you need the result for a follow-up action (e.g., start server then screenshot). Default: false (runs async, user gets progress updates)'),
+        }),
+      },
+    );
+  }
+
+  // ===== Coder Project Management Tools =====
+
+  private createListCoderProjectsTool(chatId: string) {
+    return tool(
+      async () => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, 'Listing coder projects', { chatId });
+
+        const projects = await this.configService.listCoderProjects();
+        const activeFolder = this.configService.getCoderActiveFolder(chatId);
+
+        if (projects.length === 0) {
+          return 'No project folders found. When you run a coding task, a project folder will be created automatically.';
+        }
+
+        let response = `📁 **Available Project Folders (${projects.length}):**\n\n`;
+        for (const project of projects) {
+          const isActive = project.name === activeFolder;
+          const marker = isActive ? ' ← *current*' : '';
+          response += `• **${project.name}**${marker}\n`;
+        }
+
+        if (activeFolder) {
+          response += `\n📍 Currently active: **${activeFolder}**`;
+        } else {
+          response += `\n📍 No project currently active for this chat.`;
+        }
+
+        response += `\n\nUse switchCoderProject to change the active project before running coding tasks.`;
+
+        this.agentLogger.info(LogEvent.TOOL_RESULT, `Listed ${projects.length} coder projects`, { chatId });
+        return response;
+      },
+      {
+        name: 'listCoderProjects',
+        description: `List all available coder project folders. Use this when:
+- The user asks "what projects do I have?" or "show my projects"
+- You need to know which projects exist before switching
+- The user wants to see the current active project
+- Before running a coding task when you're unsure which project to use
+
+This shows all folders under data/coder/ and indicates which one is currently active.`,
+      },
+    );
+  }
+
+  private createSwitchCoderProjectTool(chatId: string) {
+    return tool(
+      async (input: { projectName: string; createIfNotExists?: boolean }) => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Switching to coder project: ${input.projectName}`, { chatId });
+
+        const projectExists = await this.configService.coderProjectExists(input.projectName);
+
+        if (!projectExists && !input.createIfNotExists) {
+          // List available projects to help the user
+          const projects = await this.configService.listCoderProjects();
+          const projectNames = projects.map((p) => p.name).join(', ') || 'none';
+
+          this.agentLogger.info(LogEvent.TOOL_RESULT, `Project not found: ${input.projectName}`, { chatId });
+          return `❌ Project folder "${input.projectName}" does not exist.\n\nAvailable projects: ${projectNames}\n\nSet createIfNotExists=true to create a new project folder, or use an existing project name.`;
+        }
+
+        await this.configService.setCoderActiveFolder(chatId, input.projectName);
+
+        this.agentLogger.info(LogEvent.TOOL_RESULT, `Switched to project: ${input.projectName}`, { chatId });
+
+        if (!projectExists) {
+          return `✅ Switched to new project: **${input.projectName}**\n\nThis is a new project folder that will be created when you run your first coding task.`;
+        }
+
+        return `✅ Switched to project: **${input.projectName}**\n\nAll subsequent coding tasks will run in this project folder.`;
+      },
+      {
+        name: 'switchCoderProject',
+        description: `Switch the active coder project folder. Use this when:
+- The user explicitly asks to "switch to project X" or "work on project Y"
+- The user mentions a different project than the currently active one
+- Before running a coding task when the user's intent is for a different project
+- The user wants to start a new project (set createIfNotExists=true)
+
+IMPORTANT: If unsure which project the user wants, use listCoderProjects first to show available options, or ASK the user to clarify.`,
+        schema: z.object({
+          projectName: z.string().describe('The name of the project folder to switch to (e.g., "my-app", "test-api")'),
+          createIfNotExists: z.boolean().optional().describe('If true, allows switching to a new project name that will be created on first use. Default: false'),
         }),
       },
     );

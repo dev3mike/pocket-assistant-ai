@@ -21,18 +21,26 @@ import {
   StateSchema,
 } from '@langchain/langgraph';
 import * as z from 'zod';
+import * as fs from 'fs';
 import { AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage } from '@langchain/core/messages';
 import { ConfigService } from '../config/config.service';
 import { AgentLoggerService, LogEvent } from '../logger/agent-logger.service';
 import { TraceService, TraceContext } from '../logger/trace.service';
 import { ToolsService } from './tools.service';
 import { SoulService } from '../soul/soul.service';
-import { MemoryService } from '../memory/memory.service';
+import { MemoryService, FileAttachment } from '../memory/memory.service';
 import { UsageService } from '../usage/usage.service';
 import { ModelFactoryService } from '../model/model-factory.service';
 import { PromptService } from '../prompts/prompt.service';
 import { ProgressUpdate } from '../messaging/messaging.interface';
 import { sanitize } from '../utils/input-sanitizer';
+
+// Attached file info for multi-modal messages
+export interface AttachedFile {
+  id: string;
+  path: string;
+  mimeType: string;
+}
 
 
 @Injectable()
@@ -394,6 +402,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     chatId: string,
     userMessage: string,
     onProgress?: (update: ProgressUpdate) => void,
+    attachedFiles?: AttachedFile[],
   ): Promise<{ text: string; screenshots: string[] }> {
     if (!this.isInitialized) {
       return { text: 'Sorry, the AI assistant is still initializing. Please try again in a moment.', screenshots: [] };
@@ -410,18 +419,35 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
 
     this.agentLogger.info(LogEvent.MESSAGE_RECEIVED, `Received message`, {
       chatId,
-      data: { traceId: trace.traceId.slice(0, 8), messagePreview: sanitizedMessage.slice(0, 100) },
+      data: {
+        traceId: trace.traceId.slice(0, 8),
+        messagePreview: sanitizedMessage.slice(0, 100),
+        attachedFiles: attachedFiles?.length || 0,
+      },
     });
 
     // Load messages from persistent memory
     const memoryMessages = this.memoryService.getMessages(chatId);
     const messages: BaseMessage[] = this.convertMemoryToMessages(memoryMessages);
 
-    // Add the new user message (sanitized)
-    messages.push(new HumanMessage(sanitizedMessage));
+    // Add the new user message - with multi-modal content if files attached
+    const userHumanMessage = this.buildUserMessage(sanitizedMessage, attachedFiles);
+    messages.push(userHumanMessage);
 
-    // Save sanitized user message to memory (prevent prompt injection in stored memory)
-    await this.memoryService.addMessage(chatId, 'user', sanitizedMessage);
+    // Save sanitized user message to memory with file attachments if present
+    const memoryText = attachedFiles?.length
+      ? `[User sent ${attachedFiles.length} file(s)] ${sanitizedMessage}`
+      : sanitizedMessage;
+
+    // Convert AttachedFile to FileAttachment format for memory storage
+    const memoryAttachments: FileAttachment[] | undefined = attachedFiles?.map((f) => ({
+      fileId: f.id,
+      fileName: f.path.split('/').pop() || 'unknown',
+      filePath: f.path,
+      mimeType: f.mimeType,
+    }));
+
+    await this.memoryService.addMessage(chatId, 'user', memoryText, memoryAttachments);
 
     try {
       // Build agent with user-specific tools and system prompt
@@ -436,11 +462,25 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
       const finalContent = result.messages.at(-1)?.content;
       const text = typeof finalContent === 'string' ? finalContent : JSON.stringify(finalContent);
 
-      // Collect screenshot paths from tool message artifacts (executeBrowserTask returns content_and_artifact)
+      // Collect screenshot paths and sent files from tool message artifacts
       const screenshots: string[] = [];
+      const sentFiles: FileAttachment[] = [];
       for (const msg of result.messages ?? []) {
-        if (ToolMessage.isInstance(msg) && msg.artifact?.screenshots?.length) {
-          screenshots.push(...msg.artifact.screenshots);
+        if (ToolMessage.isInstance(msg) && msg.artifact) {
+          // Collect screenshots from browser tasks
+          if (msg.artifact.screenshots?.length) {
+            screenshots.push(...msg.artifact.screenshots);
+          }
+          // Collect sent files from sendStoredFile tool
+          if (msg.artifact.sentFile) {
+            const sf = msg.artifact.sentFile;
+            sentFiles.push({
+              fileId: sf.fileId,
+              fileName: sf.fileName,
+              filePath: sf.filePath,
+              mimeType: sf.mimeType,
+            });
+          }
         }
       }
 
@@ -453,8 +493,13 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
         this.agentLogger.debug(LogEvent.LLM_RESPONSE, `Token usage: ${inputTokens} in, ${outputTokens} out`, { chatId });
       }
 
-      // Save assistant response to memory
-      await this.memoryService.addMessage(chatId, 'assistant', text);
+      // Save assistant response to memory (include sent files as attachments)
+      await this.memoryService.addMessage(
+        chatId,
+        'assistant',
+        text,
+        sentFiles.length > 0 ? sentFiles : undefined,
+      );
 
       // End the trace and log summary
       this.traceService.endSpan(trace.rootSpanId, {
@@ -514,6 +559,44 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /**
+   * Build a HumanMessage with optional multi-modal content (text + images)
+   */
+  private buildUserMessage(text: string, attachedFiles?: AttachedFile[]): HumanMessage {
+    // If no files or no image files, return simple text message
+    const imageFiles = attachedFiles?.filter((f) => f.mimeType.startsWith('image/')) || [];
+
+    if (imageFiles.length === 0) {
+      return new HumanMessage(text);
+    }
+
+    // Build multi-modal content array
+    const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+      { type: 'text', text },
+    ];
+
+    // Add images as base64 data URLs
+    for (const file of imageFiles) {
+      try {
+        if (fs.existsSync(file.path)) {
+          const imageBuffer = fs.readFileSync(file.path);
+          const base64Image = imageBuffer.toString('base64');
+          content.push({
+            type: 'image_url',
+            image_url: {
+              url: `data:${file.mimeType};base64,${base64Image}`,
+            },
+          });
+          this.logger.debug(`Added image to message: ${file.path}`);
+        }
+      } catch (error) {
+        this.logger.warn(`Failed to read image file ${file.path}: ${error}`);
+      }
+    }
+
+    return new HumanMessage({ content });
+  }
+
   async clearConversation(chatId: string): Promise<void> {
     await this.memoryService.resetMemory(chatId);
     this.agentLogger.info(LogEvent.CONVERSATION_CLEARED, 'Conversation cleared', { chatId });
@@ -539,7 +622,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     const profileTools = ['getProfile', 'updateProfile'];
     const schedulerTools = ['createSchedule', 'listSchedules', 'cancelSchedule'];
     const browserTools = ['executeBrowserTask'];
-    const coderTools = ['executeCoderTask'];
+    const coderTools = ['executeCoderTask', 'listCoderProjects', 'switchCoderProject'];
     const zapierToolNames = Object.keys(this.zapierTools);
 
     return [...baseTools, ...profileTools, ...schedulerTools, ...browserTools, ...coderTools, ...zapierToolNames];
