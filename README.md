@@ -5,6 +5,15 @@
   <img src="https://img.shields.io/badge/Telegram-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram" />
 </p>
 
+<p align="center">
+  <img src="demo1.gif" alt="Demo 1" width="45%" />
+  <img src="demo2.gif" alt="Demo 2" width="45%" />
+</p>
+<p align="center">
+  <img src="demo3.gif" alt="Demo 3" width="45%" />
+  <img src="demo4.gif" alt="Demo 4" width="45%" />
+</p>
+
 <h1 align="center">Pocket Assistant AI</h1>
 
 <p align="center">
