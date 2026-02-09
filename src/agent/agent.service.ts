@@ -171,13 +171,19 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     traceId: string,
     rootSpanId: string,
     onProgress?: (update: ProgressUpdate) => void,
+    modelType?: 'main' | 'genius',
   ) {
     // Get tools specific to this chat
     const toolsByName = this.getToolsForChat(chatId);
     const tools = Object.values(toolsByName);
 
+    // Use genius model if specified, otherwise use the default main model
+    const model = modelType === 'genius'
+      ? this.modelFactory.getModel('genius')
+      : this.model;
+
     // Bind tools to model for this request
-    const modelWithTools = this.model.bindTools(tools);
+    const modelWithTools = model.bindTools(tools);
 
     const agentLogger = this.agentLogger;
     const traceService = this.traceService;
@@ -403,6 +409,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     userMessage: string,
     onProgress?: (update: ProgressUpdate) => void,
     attachedFiles?: AttachedFile[],
+    modelType?: 'main' | 'genius',
   ): Promise<{ text: string; screenshots: string[] }> {
     if (!this.isInitialized) {
       return { text: 'Sorry, the AI assistant is still initializing. Please try again in a moment.', screenshots: [] };
@@ -451,7 +458,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
 
     try {
       // Build agent with user-specific tools and system prompt
-      const agent = this.buildAgent(chatId, trace.traceId, trace.rootSpanId, onProgress);
+      const agent = this.buildAgent(chatId, trace.traceId, trace.rootSpanId, onProgress, modelType);
 
       const result = await agent.invoke({
         messages: messages,
@@ -622,9 +629,10 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     const profileTools = ['getProfile', 'updateProfile'];
     const schedulerTools = ['createSchedule', 'listSchedules', 'cancelSchedule'];
     const browserTools = ['executeBrowserTask'];
+    const browserMCPTools = ['executeBrowserMCPTask', 'continueBrowserMCPTask'];
     const coderTools = ['executeCoderTask', 'listCoderProjects', 'switchCoderProject'];
     const zapierToolNames = Object.keys(this.zapierTools);
 
-    return [...baseTools, ...profileTools, ...schedulerTools, ...browserTools, ...coderTools, ...zapierToolNames];
+    return [...baseTools, ...profileTools, ...schedulerTools, ...browserTools, ...browserMCPTools, ...coderTools, ...zapierToolNames];
   }
 }

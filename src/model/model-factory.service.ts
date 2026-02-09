@@ -10,7 +10,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { z } from 'zod';
 import { ConfigService } from '../config/config.service';
 
-export type ModelType = 'main' | 'vision' | 'coder' | 'creative';
+export type ModelType = 'main' | 'vision' | 'coder' | 'creative' | 'genius';
 
 export interface ModelOptions {
   temperature?: number;
@@ -56,6 +56,8 @@ export class ModelFactoryService implements OnModuleInit {
         return config.vision_model;
       case 'coder':
         return config.coder_model;
+      case 'genius':
+        return config.genius_model;
       case 'creative':
         return config.model; // Same as main but with higher temperature
       default:
@@ -71,6 +73,8 @@ export class ModelFactoryService implements OnModuleInit {
         return 0;
       case 'coder':
         return 0;
+      case 'genius':
+        return 0.3; // Slightly higher for more nuanced reasoning
       case 'creative':
         return 0.7;
       default:

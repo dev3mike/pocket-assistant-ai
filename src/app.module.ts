@@ -11,11 +11,13 @@ import { SoulModule } from './soul/soul.module';
 import { AiModule } from './ai/ai.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { BrowserModule } from './browser/browser.module';
+import { BrowserMCPModule } from './browser-mcp/browser-mcp.module';
 import { UsageModule } from './usage/usage.module';
 import { CoderModule } from './coder/coder.module';
 import { ModelModule } from './model/model.module';
 import { PromptModule } from './prompts/prompt.module';
 import { TranscriptionModule } from './transcription/transcription.module';
+import { NotepadModule } from './notepad/notepad.module';
 
 @Module({
   imports: [
@@ -25,6 +27,7 @@ import { TranscriptionModule } from './transcription/transcription.module';
     AppConfigModule,
     ModelModule,
     PromptModule,
+    NotepadModule, // Global notepad service for persistent data tracking
     AiModule,
     SoulModule,
     UsageModule,
@@ -44,6 +47,7 @@ import { TranscriptionModule } from './transcription/transcription.module';
     AgentModule,
     SchedulerModule,
     BrowserModule,
+    BrowserMCPModule,
     CoderModule,
     TranscriptionModule,
   ],

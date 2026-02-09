@@ -13,6 +13,8 @@ export interface AppConfig {
   model: string;
   vision_model: string;
   coder_model: string;
+  /** High-capability model for complex reasoning tasks (e.g., scheduled analysis) */
+  genius_model: string;
   security: {
     allowedUserIds: string[];
   };
@@ -25,6 +27,7 @@ const DEFAULT_CONFIG: AppConfig = {
   model: 'google/gemini-3-flash-preview',
   vision_model: 'openai/gpt-4o-mini',
   coder_model: 'google/gemini-3-flash-preview',
+  genius_model: 'anthropic/claude-sonnet-4',
   security: {
     allowedUserIds: [],
   },
@@ -115,6 +118,7 @@ export class ConfigService implements OnModuleInit, OnModuleDestroy {
           model: loaded.model ?? DEFAULT_CONFIG.model,
           vision_model: loaded.vision_model ?? DEFAULT_CONFIG.vision_model,
           coder_model: loaded.coder_model ?? DEFAULT_CONFIG.coder_model,
+          genius_model: loaded.genius_model ?? DEFAULT_CONFIG.genius_model,
           security: { ...DEFAULT_CONFIG.security, ...loaded.security },
           coderActiveByChat: loaded.coderActiveByChat != null && typeof loaded.coderActiveByChat === 'object'
             ? { ...loaded.coderActiveByChat }

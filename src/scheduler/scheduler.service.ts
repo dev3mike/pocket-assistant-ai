@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { IMessagingService, MESSAGING_SERVICE } from '../messaging/messaging.interface';
 import { AgentService } from '../agent/agent.service';
+import { NotepadService } from '../notepad/notepad.service';
 
 export interface ScheduledJob {
   id: string;
@@ -29,6 +30,9 @@ export interface ScheduledJob {
   maxExecutions?: number; // null/undefined = unlimited, 1 = one-time
   executionCount: number;
 
+  // Model settings
+  useGeniusModel?: boolean; // Use high-capability model for complex reasoning
+
   // Metadata
   createdAt: string;
   lastExecutedAt?: string;
@@ -40,24 +44,6 @@ interface CronJobsData {
   jobs: ScheduledJob[];
 }
 
-/**
- * Message in schedule-specific memory
- */
-export interface ScheduleMessage {
-  role: 'task' | 'result';
-  content: string;
-  timestamp: string;
-}
-
-/**
- * Schedule-specific memory for maintaining context between executions
- */
-export interface ScheduleMemory {
-  jobId: string;
-  messages: ScheduleMessage[];
-  lastActivity: string;
-}
-
 @Injectable()
 export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SchedulerService.name);
@@ -65,6 +51,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   private jobs: ScheduledJob[] = [];
   private checkInterval: NodeJS.Timeout | null = null;
   private cleanupInterval: NodeJS.Timeout | null = null;
+  private executingJobIds: Set<string> = new Set(); // Guard against concurrent execution
   private readonly CHECK_INTERVAL_MS = 60000; // Check every minute
   private readonly CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // Cleanup daily
   private readonly CLEANUP_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -74,6 +61,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     private readonly messagingService: IMessagingService,
     @Inject(forwardRef(() => AgentService))
     private readonly agentService: AgentService,
+    private readonly notepadService: NotepadService,
   ) {
     this.dataDir = path.join(process.cwd(), 'data');
   }
@@ -84,103 +72,6 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
 
   private getSchedulePath(chatId: string): string {
     return path.join(this.getUserDir(chatId), 'schedules.json');
-  }
-
-  /**
-   * Get the memory file path for a specific schedule
-   */
-  private getScheduleMemoryPath(chatId: string, jobId: string): string {
-    return path.join(this.getUserDir(chatId), `${jobId}_memory.json`);
-  }
-
-  /**
-   * Load memory for a specific schedule
-   */
-  private loadScheduleMemory(chatId: string, jobId: string): ScheduleMemory {
-    const memoryPath = this.getScheduleMemoryPath(chatId, jobId);
-
-    try {
-      if (fs.existsSync(memoryPath)) {
-        const content = fs.readFileSync(memoryPath, 'utf-8');
-        return JSON.parse(content);
-      }
-    } catch (error) {
-      this.logger.error(`Failed to load memory for schedule ${jobId}: ${error}`);
-    }
-
-    // Return empty memory if not found
-    return {
-      jobId,
-      messages: [],
-      lastActivity: new Date().toISOString(),
-    };
-  }
-
-  /**
-   * Save memory for a specific schedule
-   */
-  private saveScheduleMemory(chatId: string, memory: ScheduleMemory): void {
-    try {
-      const userDir = this.getUserDir(chatId);
-      if (!fs.existsSync(userDir)) {
-        fs.mkdirSync(userDir, { recursive: true });
-      }
-
-      const memoryPath = this.getScheduleMemoryPath(chatId, memory.jobId);
-      fs.writeFileSync(memoryPath, JSON.stringify(memory, null, 2));
-    } catch (error) {
-      this.logger.error(`Failed to save memory for schedule ${memory.jobId}: ${error}`);
-    }
-  }
-
-  /**
-   * Delete memory file for a specific schedule
-   */
-  private deleteScheduleMemory(chatId: string, jobId: string): void {
-    try {
-      const memoryPath = this.getScheduleMemoryPath(chatId, jobId);
-      if (fs.existsSync(memoryPath)) {
-        fs.unlinkSync(memoryPath);
-        this.logger.log(`Deleted memory file for schedule ${jobId}`);
-      }
-    } catch (error) {
-      this.logger.error(`Failed to delete memory for schedule ${jobId}: ${error}`);
-    }
-  }
-
-  /**
-   * Add a message to schedule memory
-   */
-  private addScheduleMessage(
-    chatId: string,
-    jobId: string,
-    role: 'task' | 'result',
-    content: string,
-  ): void {
-    const memory = this.loadScheduleMemory(chatId, jobId);
-
-    memory.messages.push({
-      role,
-      content,
-      timestamp: new Date().toISOString(),
-    });
-
-    // Keep only the last 3 messages to prevent memory bloat
-    const MAX_SCHEDULE_MESSAGES = 3;
-    if (memory.messages.length > MAX_SCHEDULE_MESSAGES) {
-      memory.messages = memory.messages.slice(-MAX_SCHEDULE_MESSAGES);
-    }
-
-    memory.lastActivity = new Date().toISOString();
-    this.saveScheduleMemory(chatId, memory);
-  }
-
-  /**
-   * Get recent messages from schedule memory for context
-   */
-  getScheduleHistory(chatId: string, jobId: string, limit = 3): ScheduleMessage[] {
-    const memory = this.loadScheduleMemory(chatId, jobId);
-    return memory.messages.slice(-limit);
   }
 
   async onModuleInit() {
@@ -362,9 +253,9 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       return true;
     });
 
-    // Clean up schedule memory files for removed jobs
+    // Clean up schedule notepad files for removed jobs
     for (const job of jobsToRemove) {
-      this.deleteScheduleMemory(job.chatId, job.id);
+      this.notepadService.deleteNotepad(job.chatId, job.id);
     }
 
     const removedCount = initialCount - this.jobs.length;
@@ -383,6 +274,11 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     const activeJobs = this.jobs.filter((j) => j.status === 'active');
 
     for (const job of activeJobs) {
+      // Skip if already executing (prevents race conditions for long-running jobs)
+      if (this.executingJobIds.has(job.id)) {
+        continue;
+      }
+
       const isDue = this.isJobDue(job, now);
 
       if (isDue) {
@@ -485,19 +381,27 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
    * Execute a job and update its state
    */
   private async executeJob(job: ScheduledJob): Promise<void> {
+    // Guard against concurrent execution
+    if (this.executingJobIds.has(job.id)) {
+      this.logger.warn(`Job ${job.id} is already executing, skipping duplicate trigger`);
+      return;
+    }
+
+    this.executingJobIds.add(job.id);
     this.logger.log(`Executing job ${job.id}: ${job.description}`);
 
     try {
       const taskPrompt = this.buildTaskPrompt(job);
 
-      // Save the task to schedule memory before execution
-      this.addScheduleMessage(job.chatId, job.id, 'task', job.taskContext);
-
-      // Use the full agent to process the task (with all tools available, including executeCoderTask)
-      const { text, screenshots } = await this.agentService.processMessage(job.chatId, taskPrompt);
-
-      // Save the result to schedule memory
-      this.addScheduleMessage(job.chatId, job.id, 'result', text);
+      // Use the full agent to process the task (with all tools available)
+      // The agent can use readScheduleNotepad/updateScheduleNotepad to manage its own memory
+      const { text, screenshots } = await this.agentService.processMessage(
+        job.chatId,
+        taskPrompt,
+        undefined, // onProgress - no progress callback for scheduled tasks
+        undefined, // attachedFiles
+        job.useGeniusModel ? 'genius' : undefined,
+      );
 
       const result = await this.messagingService.sendMessage(job.chatId, text);
 
@@ -520,35 +424,87 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       }
     } catch (error) {
       this.logger.error(`Error executing job ${job.id}: ${error}`);
-      // Note: This fallback message is intentionally not recorded to memory
-      // since the job execution failed and we don't want to pollute the conversation
-      // with incomplete/failed automated task attempts
       await this.messagingService.sendMessage(job.chatId, `⏰ *Reminder*: ${job.description}`);
+    } finally {
+      this.executingJobIds.delete(job.id);
     }
   }
 
   /**
    * Build the task prompt for the agent
-   * Includes schedule history for context to avoid repetition
+   * Includes notepad context for tracking data across runs
    */
   private buildTaskPrompt(job: ScheduledJob): string {
-    const history = this.getScheduleHistory(job.chatId, job.id);
+    // Get or create notepad for this schedule
+    const notepad = this.notepadService.getOrCreateNotepad(job.chatId, job.id, {
+      category: 'schedule',
+      name: job.description,
+    });
 
-    if (history.length === 0) {
-      return job.taskContext;
-    }
+    let prompt = `[SCHEDULED TASK: ${job.id}]
+Description: ${job.description}
+Run #${job.executionCount + 1}${job.maxExecutions ? ` of ${job.maxExecutions}` : ''}
+${job.useGeniusModel ? '🧠 Enhanced reasoning mode enabled\n' : ''}
+---
 
-    // Format history for context
-    let historyContext = '[Previous executions of this scheduled task - avoid repeating the same content]\n';
-    for (const msg of history) {
-      const timestamp = new Date(msg.timestamp).toLocaleString();
-      if (msg.role === 'result') {
-        // Only include results (what was sent before), not the task prompts
-        historyContext += `[${timestamp}] Previous response:\n${msg.content.slice(0, 500)}${msg.content.length > 500 ? '...' : ''}\n\n`;
+`;
+
+    // Include notepad context if it has content
+    if (notepad.notes || notepad.dataLog.length > 0 || Object.keys(notepad.keyValues).length > 0) {
+      prompt += `[NOTEPAD - Your persistent memory for this schedule]
+
+`;
+      if (Object.keys(notepad.keyValues).length > 0) {
+        prompt += `🔑 Key Values: ${JSON.stringify(notepad.keyValues)}\n\n`;
       }
+
+      if (notepad.dataLog.length > 0) {
+        const recentEntries = notepad.dataLog.slice(-10);
+        prompt += `📊 Data Log (${notepad.dataLog.length} entries, last ${recentEntries.length}):\n`;
+        for (const entry of recentEntries) {
+          const time = new Date(entry.timestamp).toLocaleString();
+          prompt += `  [${time}] ${JSON.stringify(entry.entry)}\n`;
+        }
+        prompt += '\n';
+      }
+
+      if (notepad.notes) {
+        prompt += `📝 Notes:\n${notepad.notes}\n\n`;
+      }
+
+      prompt += '---\n\n';
     }
 
-    return `${historyContext}\n---\n\n[Current task]\n${job.taskContext}`;
+    prompt += `[TASK]
+${job.taskContext}
+
+[NOTEPAD GUIDELINES]
+Use updateNotepad with notepadId="${job.id}" ONLY for data that matters across runs:
+✅ DO save: Key metrics (prices, counts), decisions made, thresholds, trends
+✅ DO use keyValues for: Current state, thresholds, last values for comparison
+✅ DO use addDataEntry for: Time-series data points (prices, metrics)
+✅ DO use notes for: Brief decision reasoning, pattern observations
+
+❌ DON'T save: Full responses, raw API data, redundant info, verbose explanations
+❌ DON'T: Add notes every run unless something meaningful changed
+
+**For EDUCATIONAL/LEARNING tasks (language lessons, daily facts, quizzes):**
+1. FIRST read keyValues to see what was already taught (topicsCovered array)
+2. Track curriculum progress in keyValues:
+   - lessonsCompleted: number (increment each run)
+   - topicsCovered: string[] (topics/phrases already taught)
+   - lastTopic: string (for continuity)
+3. Log each lesson in addDataEntry: { topic, content, phrases }
+4. NEVER repeat content from topicsCovered - always teach something NEW
+5. Reference previous lessons to build continuity
+
+Keep it CONCISE. The notepad should be scannable, not a log of everything.
+
+[RESPONSE REQUIREMENT]
+⚠️ ALWAYS respond with a brief message after completing the task. Never end with just a tool call.
+Even if only updating the notepad, provide a short summary (1-2 sentences) of what was done or observed.`;
+
+    return prompt;
   }
 
   /**
@@ -604,6 +560,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     executeAt?: string;
     cronExpression?: string;
     maxExecutions?: number;
+    useGeniusModel?: boolean;
   }): ScheduledJob | { duplicate: true; existingJob: ScheduledJob } {
     // Check for duplicate schedules
     const existingJob = this.findSimilarJob({
@@ -630,6 +587,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       executeAt: params.executeAt,
       cronExpression: params.cronExpression,
       maxExecutions: params.maxExecutions,
+      useGeniusModel: params.useGeniusModel,
       executionCount: 0,
       createdAt: new Date().toISOString(),
       status: 'active',
@@ -736,6 +694,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       executeAt?: string;
       cronExpression?: string;
       maxExecutions?: number;
+      useGeniusModel?: boolean;
     },
   ): ScheduledJob | null {
     const job = this.jobs.find((j) => j.id === jobId && j.chatId === chatId);
@@ -793,6 +752,10 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       job.maxExecutions = updates.maxExecutions;
     }
 
+    if (updates.useGeniusModel !== undefined) {
+      job.useGeniusModel = updates.useGeniusModel;
+    }
+
     this.saveJobs();
     this.logger.log(`Updated job ${jobId}`);
 
@@ -820,7 +783,9 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    return `*${job.description}*\nID: \`${job.id}\`\nSchedule: ${schedule}\nStatus: ${job.status}\n\n${job.taskContext}\n-------------------`;
+    const geniusMode = job.useGeniusModel ? '🧠 Genius Mode' : '';
+
+    return `*${job.description}*${geniusMode ? ` ${geniusMode}` : ''}\nID: \`${job.id}\`\nSchedule: ${schedule}\nStatus: ${job.status}\n\n${job.taskContext}\n-------------------`;
   }
 
   /**

@@ -255,6 +255,9 @@ DO NOT extract:
 - Runtime state or temporary values
 - Casual conversation or greetings
 - Anything you have to INFER rather than the user EXPLICITLY stating
+- Role-play instructions ("act as...", "pretend you are...", "you are a...", "behave like a...")
+- Temporary personas or characters the AI is asked to adopt
+- Simulation requests or hypothetical scenarios
 
 KEY DISTINCTION:
 - "What's the BTC price?" → DO NOT save (just a query, not a stated interest)
