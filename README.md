@@ -14,12 +14,10 @@
   Multi-agent AI with browser automation, coding, voice input, persistent notepads, and smart scheduling—including optional genius-mode reasoning for complex tasks.
 </p>
 <p align="center">
-  <img src="demo1.gif" alt="Demo 1" width="30%" />
-  <img src="demo2.gif" alt="Demo 2" width="30%" />
-</p>
-<p align="center">
-  <img src="demo3.gif" alt="Demo 3" width="30%" />
-  <img src="demo4.gif" alt="Demo 4" width="30%" />
+  <img src="demo1.gif" alt="Demo 1" width="25%" />
+  <img src="demo2.gif" alt="Demo 2" width="25%" />
+  <img src="demo3.gif" alt="Demo 3" width="25%" />
+  <img src="demo4.gif" alt="Demo 4" width="25%" />
 </p>
 <p align="center">
   <a href="#features">Features</a> •
