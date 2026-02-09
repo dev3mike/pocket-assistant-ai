@@ -9,7 +9,7 @@
 
 <p align="center">
   <strong>Your personal AI assistant that lives in your pocket.</strong><br/>
-  A powerful, extensible AI agent with browser automation, coding capabilities, and smart scheduling.
+  Multi-agent AI with browser automation, coding, voice input, persistent notepads, and smart scheduling—including optional genius-mode reasoning for complex tasks.
 </p>
 
 <p align="center">
@@ -27,27 +27,122 @@
 
 Pocket Assistant AI is an intelligent personal assistant that runs on Telegram. It remembers your conversations, learns your preferences, and can perform complex tasks like browsing the web, writing code, and managing your schedule.
 
-Unlike simple chatbots, Pocket Assistant uses a multi-agent architecture where specialized sub-agents handle different types of tasks:
+Unlike simple chatbots, Pocket Assistant uses a multi-agent architecture with persistent memory and optional high-capability reasoning:
 
-- **Main Agent** - Orchestrates conversations and routes tasks
-- **Browser Agent** - Automates web browsing with intelligent planning
-- **Coder Agent** - Writes, edits, and manages code projects
+- **Main Agent** — Orchestrates conversations, routes tasks, and can use a **genius model** for complex reasoning when you ask for it
+- **Browser Agent** — Automates web browsing with intelligent planning
+- **Coder Agent** — Writes, edits, and manages code projects
+- **Notepads** — Persistent notes and data logs so the assistant remembers context and outcomes across runs and scheduled tasks
+
+---
+
+## Prompt Examples
+
+These are real prompts you can **copy, paste, and tweak** to see what Pocket Assistant AI can do.
+
+### Scheduling
+
+```
+You: Remind me to call mom tomorrow at 3pm
+Bot: Schedule created! I'll remind you tomorrow at 3:00 PM.
+
+You: Every Monday at 9am, remind me about standup
+Bot: Recurring schedule created for every Monday at 9:00 AM.
+
+You: Every day at 9am analyze my portfolio and summarize, use genius mode
+Bot: Schedule created with genius mode — I'll use the high-capability model for the analysis and keep notes in the schedule notepad.
+```
+
+### Notepad (persistent context)
+
+The assistant can create and update notepads to remember data across runs. Scheduled tasks get their own notepad automatically; you can also ask it to track ad-hoc data.
+
+```
+You: Track the BTC price in a notepad and tell me when it crosses 100k
+Bot: I'll create a notepad and update it when we check the price...
+     [Later runs read the notepad and see history]
+```
+
+### Browser Tasks
+
+```
+You: Go to Hacker News and tell me the top 3 stories
+Bot: I'll browse Hacker News for you...
+     [Takes screenshots, extracts information]
+     Here are the top 3 stories: ...
+```
+
+### Coding
+
+```
+You: Clone github.com/user/repo and add a README file
+Bot: Starting coding task...
+     Using project folder: repo
+     Cloning repository...
+     Creating README.md...
+     Done! Created README.md with project description.
+```
+
+### Voice Input
+
+```
+You: [Send a voice message saying "What's the weather like today?"]
+Bot: Voice transcribed: "What's the weather like today?"
+     Processing...
+     [Bot responds to your question]
+
+You: Transcribe this for me
+You: [Send a voice message]
+Bot: Transcription:
+     [Your spoken words as text]
+```
+
+### API Calls
+
+```
+You: Check if api.github.com is up
+Bot: HTTP 200 OK
+     {"current_user_url":"https://api.github.com/user"...}
+```
+
+### Example prompts (copy & paste)
+
+You can send these as-is to create powerful scheduled or one-off tasks. Customize times and URLs to your needs.
+
+**Daily crypto analysis (browser + genius model + notepad)**
+
+Create a schedule that runs every morning, opens CoinGecko, captures the page, and uses the genius model for professional-style analysis:
+
+```
+Every morning at 9:35:
+
+Act as a senior and professional crypto trader:
+
+1. Open https://www.coingecko.com/en/coins/bitcoin in the browser
+2. Take a screenshot and extract all the data (chart situation, current price, and all other important data)
+3. Use genius model to analyse it as a professional crypto trader
+4. Give me a short message including comparison, signal and prediction
+```
+
+The bot will create a recurring schedule with genius mode, use the browser agent to capture the page, and the schedule notepad to keep context (e.g. previous price, trend) across runs.
 
 ---
 
 ## Features
 
 ### Intelligent Conversations
-- Powered by LLMs via OpenRouter (supports GPT-4, Claude, Gemini, and more)
+- Powered by LLMs via OpenRouter (supports GPT-4, Claude, Gemini, DeepSeek, and more)
 - **Two-layer memory**: short-term conversation history plus long-term semantic memory for important facts and preferences
 - Semantic search enriches context by retrieving relevant past conversations and stored facts
+- **Genius model** — optional high-capability model for complex reasoning (e.g. scheduled analysis); enable per task with "use genius mode"
 - Learns your preferences through the "Soul" personalization system
 
 ### Browser Automation
 - Plans and executes complex web tasks step by step
 - Takes screenshots and extracts information from pages
 - Handles dynamic content, forms, and multi-step workflows
-- Built on Playwright for reliable browser control
+- Built on **standalone Playwright** for reliable full-browser control
+- Also supports **Browser MCP** (`browsermcp.io`) so you can run the same browser tools in MCP-compatible environments
 
 ### Code Assistant
 - Clone repositories and work on code projects
@@ -59,8 +154,16 @@ Unlike simple chatbots, Pocket Assistant uses a multi-agent architecture where s
 ### Smart Scheduling
 - Natural language: "Remind me tomorrow at 5pm"
 - Recurring tasks with cron expressions
+- **Genius mode** — optionally use a high-capability model (e.g. DeepSeek V3) for complex scheduled reasoning (analysis, trends, decisions)
 - Automatic cleanup of old schedules
 - Context-aware reminders
+- Each schedule has a **persistent notepad** so the agent remembers context and outcomes across runs
+
+### Notepad — Persistent Agent Memory
+- **Cross-run memory** — the AI maintains notepads (notes, key-value state, time-series data logs) that persist across conversations and scheduled runs
+- Perfect for tracking metrics, decisions, and context (e.g. "last price", "trend", "what we decided")
+- Used automatically by scheduled tasks; also available as tools (`listNotepads`, `readNotepad`, `updateNotepad`) for ad-hoc tracking
+- Organize by category; scannable, concise storage so the agent stays in context without clutter
 
 ### Voice Input
 - Send voice messages and the AI will transcribe and act on them
@@ -86,23 +189,23 @@ Unlike simple chatbots, Pocket Assistant uses a multi-agent architecture where s
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Telegram Bot                              │
+│                        Telegram Bot                             │
 │                     (nestjs-telegraf)                           │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Messaging Abstraction                         │
+│                    Messaging Abstraction                        │
 │            (IMessagingService - extensible)                     │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Main Agent                                │
+│                        Main Agent                               │
 │                    (LangGraph ReAct)                            │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────┐ │
-│  │  Tools   │  │  Memory  │  │   Soul   │  │ Scheduler│  │State│ │
-│  └────┬─────┘  └──────────┘  └──────────┘  └──────────┘  └────┘ │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────┐ │
+│  │  Tools   │  │  Memory  │  │   Soul   │  │ Scheduler│  │ Notepad  │  │State│ │
+│  └────┬─────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └────┘ │
 └───────┼─────────────────────────────────────────────────────────┘
         │
         ├─────────────────┬─────────────────┐
@@ -118,12 +221,13 @@ Unlike simple chatbots, Pocket Assistant uses a multi-agent architecture where s
 | Component | Description |
 |-----------|-------------|
 | **Main Agent** | LangGraph-based ReAct agent that handles conversations and routes to sub-agents |
-| **Browser Agent** | Plans complex web tasks, executes them step-by-step with Playwright |
+| **Browser Agent** | Plans complex web tasks, executes them step-by-step with standalone Playwright or Browser MCP (`browsermcp.io`) |
 | **Coder Agent** | Manages code projects with file operations, git, and command execution |
 | **Soul Service** | Stores user preferences and personality settings |
 | **Memory Service** | Two-layer memory: conversation history (with summarization) and long-term semantic memory; hybrid search enriches context |
+| **Notepad Service** | Persistent notepads per chat: notes, key-values, and time-series data logs so agents remember context and outcomes across runs (used by scheduler and tools) |
 | **State Service** | Per-chat key-value state with optional TTL for scheduled tasks and cross-session data |
-| **Scheduler** | Handles reminders and recurring tasks with cron support |
+| **Scheduler** | Handles reminders and recurring tasks with cron support; optional genius model and per-job notepad for complex scheduled reasoning |
 
 ---
 
@@ -237,7 +341,8 @@ Configuration is loaded from `data/config.json` (created with defaults on first 
   },
   "model": "google/gemini-2.0-flash-001",
   "vision_model": "google/gemini-2.0-flash-001",
-  "coder_model": "anthropic/claude-sonnet-4"
+  "coder_model": "anthropic/claude-sonnet-4",
+  "genius_model": "deepseek/deepseek-v3.2"
 }
 ```
 
@@ -245,10 +350,14 @@ Configuration is loaded from `data/config.json` (created with defaults on first 
 
 Choose any model from [OpenRouter](https://openrouter.ai/models):
 
-- `google/gemini-2.0-flash-001` - Fast and capable (default)
-- `anthropic/claude-sonnet-4` - Great for coding
-- `openai/gpt-4-turbo` - Strong reasoning
-- `meta-llama/llama-3-70b` - Open source option
+| Role | Purpose | Example |
+|------|---------|---------|
+| `model` | Main conversations and routing | `google/gemini-2.0-flash-001`, `deepseek/deepseek-v3.2` |
+| `vision_model` | Browser and image understanding | `openai/gpt-4o-mini` |
+| `coder_model` | Code editing and analysis | `anthropic/claude-sonnet-4`, `google/gemini-2.5-pro` |
+| `genius_model` | Complex reasoning (e.g. scheduled analysis, "genius mode") | `deepseek/deepseek-v3.2` |
+
+- **Genius model** is used when you enable "genius mode" on a schedule (e.g. "remind me to analyze trends every morning, use genius mode") for deeper reasoning without slowing everyday chat.
 
 ---
 
@@ -296,62 +405,6 @@ docker compose up -d
 
 ---
 
-## Usage Examples
-
-### Scheduling
-
-```
-You: Remind me to call mom tomorrow at 3pm
-Bot: Schedule created! I'll remind you tomorrow at 3:00 PM.
-
-You: Every Monday at 9am, remind me about standup
-Bot: Recurring schedule created for every Monday at 9:00 AM.
-```
-
-### Browser Tasks
-
-```
-You: Go to Hacker News and tell me the top 3 stories
-Bot: I'll browse Hacker News for you...
-     [Takes screenshots, extracts information]
-     Here are the top 3 stories: ...
-```
-
-### Coding
-
-```
-You: Clone github.com/user/repo and add a README file
-Bot: Starting coding task...
-     Using project folder: repo
-     Cloning repository...
-     Creating README.md...
-     Done! Created README.md with project description.
-```
-
-### Voice Input
-
-```
-You: [Send a voice message saying "What's the weather like today?"]
-Bot: Voice transcribed: "What's the weather like today?"
-     Processing...
-     [Bot responds to your question]
-
-You: Transcribe this for me
-You: [Send a voice message]
-Bot: Transcription:
-     [Your spoken words as text]
-```
-
-### API Calls
-
-```
-You: Check if api.github.com is up
-Bot: HTTP 200 OK
-     {"current_user_url":"https://api.github.com/user"...}
-```
-
----
-
 ## Project Structure
 
 ```
@@ -365,9 +418,10 @@ pocket-assistant-ai/
 │   ├── logger/          # Logging and tracing
 │   ├── memory/          # Conversation + long-term memory, embeddings, semantic search
 │   ├── messaging/       # Messaging abstraction layer
-│   ├── model/           # Model factory service
+│   ├── model/           # Model factory (main, vision, coder, genius)
+│   ├── notepad/         # Persistent notepads (notes, key-values, data logs) per chat
 │   ├── prompts/         # Prompt templates (YAML)
-│   ├── scheduler/       # Task scheduling
+│   ├── scheduler/       # Task scheduling (cron, genius mode, schedule notepads)
 │   ├── soul/            # User personalization
 │   ├── state/           # Per-chat key-value state (TTL support)
 │   ├── telegram/        # Telegram integration
@@ -376,7 +430,7 @@ pocket-assistant-ai/
 ├── data/
 │   ├── config.json      # Application config (created on first run)
 │   ├── prompts/         # YAML prompt files
-│   └── {userId}/        # Per-user: memory.json, longterm-memory.json, state.json, schedules, soul, etc.
+│   └── {userId}/        # Per-user: memory, longterm-memory, state, schedules, notepads/, soul, etc.
 ├── docker-compose.yml   # Langfuse only (port 31111)
 └── Dockerfile           # Production container
 ```
