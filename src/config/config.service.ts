@@ -27,7 +27,7 @@ const DEFAULT_CONFIG: AppConfig = {
   model: 'google/gemini-3-flash-preview',
   vision_model: 'openai/gpt-4o-mini',
   coder_model: 'google/gemini-3-flash-preview',
-  genius_model: 'anthropic/claude-sonnet-4',
+  genius_model: 'deepseek/deepseek-v3.2',
   security: {
     allowedUserIds: [],
   },
@@ -138,6 +138,12 @@ export class ConfigService implements OnModuleInit, OnModuleDestroy {
   private async saveConfig(): Promise<void> {
     try {
       this.lastSaveTime = Date.now();
+
+      // Ensure the config directory exists so that on fresh installs
+      // (where data/ may not exist yet) we can auto-generate config.json.
+      const configDir = path.dirname(this.configPath);
+      await fsPromises.mkdir(configDir, { recursive: true });
+
       await fsPromises.writeFile(this.configPath, JSON.stringify(this.config, null, 2));
     } catch (error) {
       this.logger.error(`Failed to save config: ${error}`);
