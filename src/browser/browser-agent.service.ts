@@ -353,7 +353,15 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
           throw new Error(`Unknown action: ${actionDecision.action}`);
         }
 
-        const result = await toolFn.invoke(actionDecision.params);
+        // Coerce string booleans to actual booleans (LLM sometimes outputs "true" instead of true)
+        const coercedParams = { ...actionDecision.params };
+        for (const key of ['pressEnter', 'clearFirst', 'fullPage']) {
+          if (key in coercedParams && typeof coercedParams[key] === 'string') {
+            coercedParams[key] = coercedParams[key].toLowerCase() === 'true';
+          }
+        }
+
+        const result = await toolFn.invoke(coercedParams);
         const resultData = safeJsonParse<Record<string, any>>(result, { success: false, error: 'Invalid JSON response' });
 
         // Update state based on result
@@ -532,7 +540,15 @@ export class BrowserAgentService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      const result = await toolFn.invoke(params);
+      // Coerce string booleans to actual booleans
+      const coercedParams = { ...params };
+      for (const key of ['pressEnter', 'clearFirst', 'fullPage']) {
+        if (key in coercedParams && typeof coercedParams[key] === 'string') {
+          coercedParams[key] = coercedParams[key].toLowerCase() === 'true';
+        }
+      }
+
+      const result = await toolFn.invoke(coercedParams);
       return {
         success: true,
         result: JSON.parse(result),
