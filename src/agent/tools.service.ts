@@ -1,14 +1,14 @@
 /**
  * Defines the tools the MAIN AGENT can call. Provides getProfile,
  * updateProfile, createSchedule, listSchedules, cancelSchedule, httpRequest, executeBrowserTask,
- * memorySearch, memorySave, and state management tools (getState, setState, deleteState, listState).
+ * memorySearch, memorySave, and notepad tools (listNotepads, readNotepad, updateNotepad).
  * When the main agent calls executeBrowserTask(task), this service invokes the
  * Browser Agent (BrowserAgentService) and returns summary + screenshots as a
  * content_and_artifact ToolMessage. When the main agent calls executeCoderTask(task),
  * this service starts the Coder Agent in the background and returns immediately;
  * progress is sent to the user via Telegram. httpRequest performs curl-like HTTP calls.
  * memorySearch and memorySave provide access to the two-layer memory system.
- * State tools provide key-value storage for runtime data (e.g., previous values for comparisons).
+ * Notepad tools provide generic persistent memory for tracking data across runs.
  * Does not run any agent loop itself.
  */
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
@@ -20,8 +20,9 @@ import { AiService } from '../ai/ai.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
 import { BrowserAgentService } from '../browser/browser-agent.service';
 import { CoderAgentService } from '../coder/coder-agent.service';
+import { BrowserMCPAgentService } from '../browser-mcp/browser-mcp-agent.service';
 import { MemoryService } from '../memory/memory.service';
-import { StateService } from '../state/state.service';
+import { NotepadService } from '../notepad/notepad.service';
 import { FileToolsService } from '../file/file-tools.service';
 import { MemoryCategory } from '../memory/memory.types';
 import { validateUrlForSsrf } from '../utils/input-sanitizer';
@@ -39,8 +40,9 @@ export class ToolsService {
     private readonly schedulerService: SchedulerService,
     private readonly browserAgentService: BrowserAgentService,
     private readonly coderAgentService: CoderAgentService,
+    private readonly browserMCPAgentService: BrowserMCPAgentService,
     private readonly memoryService: MemoryService,
-    private readonly stateService: StateService,
+    private readonly notepadService: NotepadService,
     @Inject(forwardRef(() => FileToolsService))
     private readonly fileToolsService: FileToolsService,
   ) { }
@@ -72,17 +74,19 @@ export class ToolsService {
       updateSchedule: this.createUpdateScheduleTool(chatId),
       reactivateSchedule: this.createReactivateScheduleTool(chatId),
       executeBrowserTask: this.createExecuteBrowserTaskTool(chatId),
+      executeBrowserMCPTask: this.createExecuteBrowserMCPTaskTool(chatId),
+      continueBrowserMCPTask: this.createContinueBrowserMCPTaskTool(chatId),
       executeCoderTask: this.createExecuteCoderTaskTool(chatId),
       listCoderProjects: this.createListCoderProjectsTool(chatId),
       switchCoderProject: this.createSwitchCoderProjectTool(chatId),
       httpRequest: this.createHttpRequestTool(chatId),
       memorySearch: this.createMemorySearchTool(chatId),
       memorySave: this.createMemorySaveTool(chatId),
-      // State management tools for runtime key-value storage
-      getState: this.createGetStateTool(chatId),
-      setState: this.createSetStateTool(chatId),
-      deleteState: this.createDeleteStateTool(chatId),
-      listState: this.createListStateTool(chatId),
+      // Generic notepad tools for persistent data tracking
+      listNotepads: this.createListNotepadsTool(chatId),
+      readNotepad: this.createReadNotepadTool(chatId),
+      updateNotepad: this.createUpdateNotepadTool(chatId),
+      deleteNotepad: this.createDeleteNotepadTool(chatId),
       // File management tools
       ...fileTools,
     };
@@ -228,7 +232,7 @@ export class ToolsService {
 IMPORTANT: additionalContext is for STATIC preferences and background info ONLY (e.g., "prefers formal tone", "works in tech").
 DO NOT use additionalContext for:
 - Schedule/task status (use createSchedule/listSchedules)
-- Runtime state like "last BTC price" (use setState)
+- Runtime state like "last BTC price" (use schedule notepad for scheduled tasks)
 - Anything that changes frequently or should expire`,
         schema: z.object({
           aiName: z.string().optional().describe('New name for the AI assistant'),
@@ -252,6 +256,7 @@ DO NOT use additionalContext for:
         executeAt?: string;
         cronExpression?: string;
         maxExecutions?: number;
+        useGeniusModel?: boolean;
       }) => {
         // Validate that at least one time specification is provided
         if (!input.executeAt && !input.cronExpression) {
@@ -284,6 +289,7 @@ DO NOT use additionalContext for:
             executeAt: input.executeAt,
             cronExpression: input.cronExpression,
             maxExecutions: input.maxExecutions,
+            useGeniusModel: input.useGeniusModel,
           });
 
           // Check if this is a duplicate
@@ -368,13 +374,27 @@ For RECURRING tasks: Use cronExpression with a cron format "minute hour dayOfMon
   - "0 9 * * 1-5" = Weekdays at 9:00 AM
   - "0 9,18 * * *" = Every day at 9:00 AM and 6:00 PM
 
-Use maxExecutions to limit how many times a recurring task runs (e.g., 10 for "remind me 10 times").`,
+Use maxExecutions to limit how many times a recurring task runs (e.g., 10 for "remind me 10 times").
+
+**GENIUS MODE (useGeniusModel):**
+Set useGeniusModel=true ONLY when the user explicitly requests enhanced reasoning. Look for phrases like:
+- "use genius mode", "use smart mode", "use genius model"
+- "use enhanced reasoning", "use the smart model"
+- "with deep analysis", "with advanced reasoning"
+
+Default is FALSE (uses standard model). Genius mode is expensive, so only enable when user explicitly asks.
+
+Examples:
+- "Schedule stock analysis every morning, use genius mode" → useGeniusModel: true
+- "Schedule stock analysis every morning" → useGeniusModel: false (default)
+- "Remind me with smart reasoning to analyze trends" → useGeniusModel: true`,
         schema: z.object({
           description: z.string().describe('Short summary of the task (e.g., "Send a Persian poem", "Remind about meeting")'),
           taskContext: z.string().describe('The SPECIFIC request to execute when task runs. Must contain clear, actionable instructions. If the user did not provide enough detail, DO NOT fill this in with assumptions - ask them first.'),
           executeAt: z.string().optional().describe('ISO date string for one-time execution (e.g., "2024-12-25T09:00:00")'),
           cronExpression: z.string().optional().describe('Cron expression for recurring tasks (e.g., "0 9 * * 1" for 9 AM every Monday)'),
           maxExecutions: z.number().optional().describe('Maximum number of times to execute (for recurring tasks). Omit for unlimited.'),
+          useGeniusModel: z.boolean().optional().describe('Enable genius model. Default: false. Only set true when user explicitly says "genius mode", "smart mode", "enhanced reasoning", etc.'),
         }),
       },
     );
@@ -459,6 +479,7 @@ User must say things like: "cancel", "remove", "delete", "stop", "turn off", "di
         executeAt?: string;
         cronExpression?: string;
         maxExecutions?: number;
+        useGeniusModel?: boolean;
       }) => {
         const job = this.schedulerService.getJob(input.jobId);
 
@@ -499,6 +520,7 @@ User must say things like: "cancel", "remove", "delete", "stop", "turn off", "di
           executeAt?: string;
           cronExpression?: string;
           maxExecutions?: number;
+          useGeniusModel?: boolean;
         } = {};
 
         if (input.description) updates.description = input.description;
@@ -506,9 +528,10 @@ User must say things like: "cancel", "remove", "delete", "stop", "turn off", "di
         if (input.executeAt) updates.executeAt = input.executeAt;
         if (input.cronExpression) updates.cronExpression = input.cronExpression;
         if (input.maxExecutions !== undefined) updates.maxExecutions = input.maxExecutions;
+        if (input.useGeniusModel !== undefined) updates.useGeniusModel = input.useGeniusModel;
 
         if (Object.keys(updates).length === 0) {
-          return 'No updates provided. You can update: description, taskContext, executeAt, cronExpression, or maxExecutions.';
+          return 'No updates provided. You can update: description, taskContext, executeAt, cronExpression, maxExecutions, or useGeniusModel.';
         }
 
         const updatedJob = this.schedulerService.updateJob(input.jobId, chatId, updates);
@@ -537,20 +560,19 @@ User must say things like: "cancel", "remove", "delete", "stop", "turn off", "di
 - Change the description or task content of an existing schedule
 - Change the timing (executeAt or cronExpression)
 - Modify the max executions limit
+- Enable/disable genius mode
 
 This is more efficient than canceling and creating a new schedule because:
-- It preserves the schedule's history/memory (previous executions)
+- It preserves the schedule's notepad (data history, notes)
 - It keeps the same job ID
 - It's a single operation
 
 **EXPLICIT REQUEST REQUIRED:**
 User must explicitly ask to update/modify/change a schedule.
 
-**When to use updateSchedule vs cancel+create:**
-- User says "change the time of my reminder" → updateSchedule
-- User says "make the poem schedule run at 9am instead" → updateSchedule
-- User says "update the bitcoin check to run every hour" → updateSchedule
-- User says "cancel that and create a new one" → cancel + create`,
+**Genius mode toggle:**
+- User says "enable genius mode on my stock schedule" → useGeniusModel: true
+- User says "turn off smart mode for that task" → useGeniusModel: false`,
         schema: z.object({
           jobId: z.string().describe('The ID of the schedule to update (get this from listSchedules)'),
           description: z.string().optional().describe('New description for the schedule'),
@@ -558,6 +580,7 @@ User must explicitly ask to update/modify/change a schedule.
           executeAt: z.string().optional().describe('New execution time for one-time schedules (ISO format). This will convert a recurring schedule to one-time.'),
           cronExpression: z.string().optional().describe('New cron expression for recurring schedules (e.g., "0 9 * * *"). This will convert a one-time schedule to recurring.'),
           maxExecutions: z.number().optional().describe('New maximum number of executions for recurring tasks'),
+          useGeniusModel: z.boolean().optional().describe('Enable/disable genius mode for this schedule'),
         }),
       },
     );
@@ -800,6 +823,204 @@ Examples (browser explicitly requested):
 - User says "use the browser to go to example.com" → task: "go to example.com"`,
         schema: z.object({
           task: z.string().describe('The EXACT browser task as stated by the user. Do not add or interpret - pass exactly what was requested.'),
+        }),
+      },
+    );
+  }
+
+  // ===== Browser MCP Tools =====
+
+  private createExecuteBrowserMCPTaskTool(chatId: string) {
+    return tool(
+      async (input: { task: string }): Promise<[string, { screenshots: string[] }]> => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Browser MCP task: ${input.task}`, { chatId });
+
+        try {
+          const result = await this.browserMCPAgentService.executeTask(input.task, chatId);
+
+          this.agentLogger.info(
+            result.success ? LogEvent.TOOL_RESULT : LogEvent.TOOL_ERROR,
+            `Browser MCP task ${result.success ? 'completed' : 'failed'}: ${result.stepsCompleted.length} steps`,
+            { chatId },
+          );
+
+          // Format the result (text only; screenshots go in artifact)
+          let response = '';
+
+          if (result.needsUserInput) {
+            // Agent needs user input to continue
+            response = `🔄 **Browser MCP needs your input**\n\n`;
+            response += `**Question:** ${result.question}\n\n`;
+            response += `**Session ID:** \`${result.sessionId}\`\n\n`;
+            response += `Please answer the question above. To continue, use continueBrowserMCPTask with the session ID and your answer.`;
+            response += `\n\n**Steps completed so far:**\n`;
+            for (const step of result.stepsCompleted) {
+              response += `• ${step}\n`;
+            }
+          } else if (result.success) {
+            response = `✅ **Browser MCP task completed**\n\n`;
+            response += `**Summary:** ${result.summary}\n\n`;
+
+            if (result.stepsCompleted.length > 0) {
+              response += `**Steps completed:**\n`;
+              for (const step of result.stepsCompleted.slice(-5)) {
+                response += `• ${step}\n`;
+              }
+              if (result.stepsCompleted.length > 5) {
+                response += `  ... and ${result.stepsCompleted.length - 5} more steps\n`;
+              }
+            }
+
+            if (result.extractedData && result.extractedData.length > 0) {
+              response += `\n**Extracted Data:**\n`;
+              for (const data of result.extractedData) {
+                const preview = typeof data.data === 'string'
+                  ? data.data.slice(0, 300)
+                  : JSON.stringify(data.data).slice(0, 300);
+                response += `• ${data.tool}: ${preview}${preview.length >= 300 ? '...' : ''}\n`;
+              }
+            }
+          } else {
+            response = `❌ **Browser MCP task failed**\n\n`;
+            response += `**Error:** ${result.error}\n\n`;
+
+            if (result.stepsCompleted.length > 0) {
+              response += `**Steps completed before failure:**\n`;
+              for (const step of result.stepsCompleted.slice(-3)) {
+                response += `• ${step}\n`;
+              }
+            }
+          }
+
+          // Filter screenshots to only include valid file paths (not fileid references)
+          const rawScreenshots = result.screenshots ?? [];
+          const validScreenshots = rawScreenshots.filter(
+            (s) => s && !s.startsWith('fileid:') && (s.includes('/') || s.includes('\\')),
+          );
+
+          // Debug: log screenshot info
+          this.agentLogger.debug(LogEvent.TOOL_RESULT, `Browser MCP screenshots - raw: ${rawScreenshots.length}, valid: ${validScreenshots.length}`, {
+            chatId,
+            data: { rawScreenshots, validScreenshots },
+          });
+
+          // Return [content, artifact] so ToolMessage gets text + screenshots
+          return [response, { screenshots: validScreenshots }];
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          this.agentLogger.error(LogEvent.TOOL_ERROR, `Browser MCP task failed: ${errorMsg}`, { chatId });
+          return [`Browser MCP task failed: ${errorMsg}`, { screenshots: [] }];
+        }
+      },
+      {
+        name: 'executeBrowserMCPTask',
+        responseFormat: 'content_and_artifact' as const,
+        description: `Execute a browser automation task using Browser MCP. This uses your ACTUAL browser (not headless) via the Browser MCP Chrome extension.
+
+**WHEN TO USE THIS TOOL:**
+Use when the user explicitly asks to use "Browser MCP" or needs to:
+- Interact with their logged-in browser session (preserved cookies, auth, extensions)
+- Automate tasks in their real browser
+- Access sites that require their existing login
+
+**PREREQUISITES:**
+- Browser MCP Chrome extension must be installed
+- User's browser must be open
+- Extension must be connected
+
+**INTERACTIVE MODE:**
+This tool can pause and ask the user questions during execution when:
+- It needs login credentials
+- Multiple options are available and user preference is unclear
+- Confirmation is needed before an action
+- The task description is ambiguous
+
+If the tool returns needsUserInput=true, relay the question to the user and use continueBrowserMCPTask with their answer.
+
+**DIFFERENCE FROM executeBrowserTask:**
+- executeBrowserTask: Uses headless Playwright browser (isolated, fresh session)
+- executeBrowserMCPTask: Uses user's real browser (logged-in sessions, cookies, extensions)
+
+**EXAMPLES:**
+- "Use Browser MCP to check my Gmail" → uses logged-in session
+- "Use my browser to purchase X on Amazon" → uses saved payment methods
+- "Browser MCP: book a restaurant on OpenTable" → interactive, may ask for preferences`,
+        schema: z.object({
+          task: z.string().describe('The browser automation task to perform. Be descriptive about what should be accomplished.'),
+        }),
+      },
+    );
+  }
+
+  private createContinueBrowserMCPTaskTool(chatId: string) {
+    return tool(
+      async (input: { sessionId: string; userInput: string }): Promise<[string, { screenshots: string[] }]> => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Continue Browser MCP session: ${input.sessionId}`, { chatId });
+
+        try {
+          const result = await this.browserMCPAgentService.continueWithInput(input.sessionId, input.userInput);
+
+          this.agentLogger.info(
+            result.success ? LogEvent.TOOL_RESULT : LogEvent.TOOL_ERROR,
+            `Browser MCP continuation ${result.success ? 'completed' : 'failed'}`,
+            { chatId },
+          );
+
+          // Format similar to executeBrowserMCPTask (text only; screenshots go in artifact)
+          let response = '';
+
+          if (result.needsUserInput) {
+            response = `🔄 **Browser MCP needs more input**\n\n`;
+            response += `**Question:** ${result.question}\n\n`;
+            response += `**Session ID:** \`${result.sessionId}\`\n\n`;
+            response += `Please answer the question above to continue.`;
+          } else if (result.success) {
+            response = `✅ **Browser MCP task completed**\n\n`;
+            response += `**Summary:** ${result.summary}\n\n`;
+
+            if (result.stepsCompleted.length > 0) {
+              response += `**Steps completed:**\n`;
+              for (const step of result.stepsCompleted.slice(-5)) {
+                response += `• ${step}\n`;
+              }
+            }
+
+            if (result.extractedData && result.extractedData.length > 0) {
+              response += `\n**Extracted Data:**\n`;
+              for (const data of result.extractedData) {
+                const preview = typeof data.data === 'string'
+                  ? data.data.slice(0, 300)
+                  : JSON.stringify(data.data).slice(0, 300);
+                response += `• ${data.tool}: ${preview}\n`;
+              }
+            }
+          } else {
+            response = `❌ **Browser MCP task failed**\n\n`;
+            response += `**Error:** ${result.error}`;
+          }
+
+          // Filter screenshots to only include valid file paths (not fileid references)
+          const validScreenshots = (result.screenshots ?? []).filter(
+            (s) => s && !s.startsWith('fileid:') && (s.includes('/') || s.includes('\\')),
+          );
+
+          // Return [content, artifact] so ToolMessage gets text + screenshots
+          return [response, { screenshots: validScreenshots }];
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          this.agentLogger.error(LogEvent.TOOL_ERROR, `Browser MCP continuation failed: ${errorMsg}`, { chatId });
+          return [`Failed to continue Browser MCP session: ${errorMsg}`, { screenshots: [] }];
+        }
+      },
+      {
+        name: 'continueBrowserMCPTask',
+        responseFormat: 'content_and_artifact' as const,
+        description: `Continue a Browser MCP session after the user provides input. Use this when executeBrowserMCPTask returned needsUserInput=true.
+
+The user should have answered the question asked by the Browser MCP agent. Pass their answer along with the session ID to continue the task.`,
+        schema: z.object({
+          sessionId: z.string().describe('The session ID returned by executeBrowserMCPTask'),
+          userInput: z.string().describe('The user\'s answer to the question asked by Browser MCP'),
         }),
       },
     );
@@ -1134,7 +1355,7 @@ This searches both recent conversation history and long-term memories.`,
 - A significant decision is made
 - The user shares ongoing context about projects or goals
 
-DO NOT use for runtime/temporary data like "last BTC price" or scheduled task state - use setState for those.
+DO NOT use for runtime/temporary data like "last BTC price" - use updateNotepad for tracking data over time.
 
 Categories:
 - "fact": Factual information about the user or their world
@@ -1151,171 +1372,215 @@ Categories:
     );
   }
 
-  // ===== State Management Tools =====
+  // ===== Generic Notepad Tools =====
 
-  private createGetStateTool(chatId: string) {
+  private createListNotepadsTool(chatId: string) {
     return tool(
-      (input: { key: string }) => {
-        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Get state: ${input.key}`, { chatId });
+      (input: { category?: string }) => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `List notepads${input.category ? ` (category: ${input.category})` : ''}`, { chatId });
 
-        const entry = this.stateService.getStateEntry(chatId, input.key);
+        const notepads = this.notepadService.listNotepads(chatId, input.category);
 
-        if (!entry) {
-          this.agentLogger.info(LogEvent.TOOL_RESULT, `State not found: ${input.key}`, { chatId });
-          return `No value found for key "${input.key}"`;
+        if (notepads.length === 0) {
+          return input.category
+            ? `No notepads found in category "${input.category}". Use updateNotepad to create one.`
+            : 'No notepads found. Use updateNotepad to create one.';
         }
 
-        this.agentLogger.info(LogEvent.TOOL_RESULT, `State retrieved: ${input.key}`, { chatId });
-
-        let response = `Key: ${entry.key}\nValue: ${JSON.stringify(entry.value)}`;
-        response += `\nUpdated: ${entry.updatedAt}`;
-        if (entry.expiresAt) {
-          response += `\nExpires: ${entry.expiresAt}`;
+        let response = `📓 **Notepads** (${notepads.length}):\n\n`;
+        for (const np of notepads) {
+          const categoryTag = np.category ? ` [${np.category}]` : '';
+          const name = np.name ? ` - ${np.name}` : '';
+          response += `• **${np.id}**${categoryTag}${name}\n`;
+          response += `  Keys: ${np.keyValueKeys.length > 0 ? np.keyValueKeys.join(', ') : 'none'}`;
+          response += ` | Data entries: ${np.dataLogCount}`;
+          response += ` | Has notes: ${np.hasNotes ? 'yes' : 'no'}\n`;
+          response += `  Updated: ${new Date(np.lastUpdated).toLocaleString()}\n\n`;
         }
 
+        this.agentLogger.info(LogEvent.TOOL_RESULT, `Listed ${notepads.length} notepads`, { chatId });
         return response;
       },
       {
-        name: 'getState',
-        description: `Retrieve a stored runtime value by key. Use for:
-- Getting previous values for comparison (e.g., last BTC price, last check time)
-- Retrieving temporary data stored by scheduled tasks
-- Checking if a value exists before updating it
-
-IMPORTANT: If you don't know the exact key name, call listState first to see available keys. Don't guess key names.`,
+        name: 'listNotepads',
+        description: `List all notepads. Shows what notepads exist with a summary of their contents.
+Notepads persist data across runs - use for tracking metrics, decisions, or any data over time.`,
         schema: z.object({
-          key: z.string().describe('The exact key to retrieve. Call listState first if unsure about available keys.'),
+          category: z.string().optional().describe('Optional: filter by category (e.g., "schedule")'),
         }),
       },
     );
   }
 
-  private createSetStateTool(chatId: string) {
+  private createReadNotepadTool(chatId: string) {
     return tool(
-      (input: { key: string; value: any; ttlMinutes?: number }) => {
-        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Set state: ${input.key}`, { chatId });
+      (input: { notepadId: string }) => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Read notepad: ${input.notepadId}`, { chatId });
 
-        try {
-          const entry = this.stateService.setState(chatId, input.key, input.value, input.ttlMinutes);
+        const notepad = this.notepadService.loadNotepad(chatId, input.notepadId);
 
-          this.agentLogger.info(LogEvent.TOOL_RESULT, `State saved: ${input.key}`, { chatId });
-
-          let response = `✅ State saved:\nKey: ${entry.key}\nValue: ${JSON.stringify(entry.value)}`;
-          if (entry.expiresAt) {
-            response += `\nExpires: ${entry.expiresAt}`;
-          }
-
-          return response;
-        } catch (error) {
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          this.agentLogger.error(LogEvent.TOOL_ERROR, `Set state failed: ${errorMsg}`, { chatId });
-          return `Failed to save state: ${errorMsg}`;
+        if (!notepad) {
+          return `Notepad "${input.notepadId}" not found. Use listNotepads to see available notepads, or updateNotepad to create one.`;
         }
+
+        if (!notepad.notes && notepad.dataLog.length === 0 && Object.keys(notepad.keyValues).length === 0) {
+          return `Notepad "${input.notepadId}" exists but is empty. Use updateNotepad to add notes, data entries, or key values.`;
+        }
+
+        let response = `📓 **Notepad: ${input.notepadId}**`;
+        if (notepad.category) response += ` [${notepad.category}]`;
+        if (notepad.name) response += ` - ${notepad.name}`;
+        response += '\n\n';
+
+        if (notepad.notes) {
+          response += `**Notes:**\n${notepad.notes}\n\n`;
+        }
+
+        if (Object.keys(notepad.keyValues).length > 0) {
+          response += `**Key Values:**\n${JSON.stringify(notepad.keyValues, null, 2)}\n\n`;
+        }
+
+        if (notepad.dataLog.length > 0) {
+          response += `**Data Log** (${notepad.dataLog.length} entries):\n`;
+          // Show recent entries (last 20)
+          const recentEntries = notepad.dataLog.slice(-20);
+          for (const entry of recentEntries) {
+            const time = new Date(entry.timestamp).toLocaleString();
+            response += `[${time}] ${JSON.stringify(entry.entry)}\n`;
+          }
+          if (notepad.dataLog.length > 20) {
+            response += `... and ${notepad.dataLog.length - 20} more entries\n`;
+          }
+        }
+
+        response += `\nCreated: ${new Date(notepad.createdAt).toLocaleString()}`;
+        response += `\nLast updated: ${new Date(notepad.lastUpdated).toLocaleString()}`;
+
+        this.agentLogger.info(LogEvent.TOOL_RESULT, `Read notepad ${input.notepadId}`, { chatId });
+        return response;
       },
       {
-        name: 'setState',
-        description: `Store a runtime value with an optional expiration time. Use for:
-- Storing values between scheduled task runs (e.g., previous BTC price for comparison)
-- Temporary data that should auto-expire (use ttlMinutes)
-- Cross-session state that isn't appropriate for long-term memory
-
-DO NOT use updateProfile for this kind of data - use setState instead.`,
+        name: 'readNotepad',
+        description: `Read a notepad's contents (notes, keyValues, dataLog). Use to review data from previous runs.`,
         schema: z.object({
-          key: z.string().describe('The key to store under (e.g., "last_btc_price", "last_check_time")'),
-          value: z.any().describe('The value to store (can be string, number, object, array)'),
-          ttlMinutes: z.number().optional().describe('Optional time-to-live in minutes. After this time, the value auto-expires.'),
+          notepadId: z.string().describe('The notepad ID to read'),
         }),
       },
     );
   }
 
-  private createDeleteStateTool(chatId: string) {
+  private createUpdateNotepadTool(chatId: string) {
     return tool(
-      (input: { key: string }) => {
-        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Delete state: ${input.key}`, { chatId });
+      (input: {
+        notepadId: string;
+        category?: string;
+        name?: string;
+        notes?: string;
+        appendToNotes?: string;
+        addDataEntry?: Record<string, any>;
+        keyValues?: Record<string, any>;
+      }) => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Update notepad: ${input.notepadId}`, { chatId });
 
-        const deleted = this.stateService.deleteState(chatId, input.key);
+        // Validate that at least one update is provided
+        if (!input.notes && !input.appendToNotes && !input.addDataEntry && !input.keyValues && !input.name) {
+          return 'No updates provided. Provide at least one of: notes, appendToNotes, addDataEntry, keyValues, or name.';
+        }
+
+        // Check if notepad exists, if not create with category
+        let notepad = this.notepadService.loadNotepad(chatId, input.notepadId);
+        const isNew = !notepad;
+
+        if (isNew) {
+          notepad = this.notepadService.createNotepad(chatId, input.notepadId, {
+            category: input.category,
+            name: input.name,
+          });
+        }
+
+        notepad = this.notepadService.updateNotepad(chatId, input.notepadId, {
+          notes: input.notes,
+          appendToNotes: input.appendToNotes,
+          addDataEntry: input.addDataEntry,
+          keyValues: input.keyValues,
+          name: input.name,
+        });
+
+        let response = isNew
+          ? `✅ Created and updated notepad "${input.notepadId}"\n\n`
+          : `✅ Updated notepad "${input.notepadId}"\n\n`;
+
+        if (input.name) {
+          response += `• Name: ${input.name}\n`;
+        }
+        if (input.notes) {
+          response += `• Notes replaced\n`;
+        }
+        if (input.appendToNotes) {
+          response += `• Appended to notes\n`;
+        }
+        if (input.addDataEntry) {
+          response += `• Added data entry: ${JSON.stringify(input.addDataEntry)}\n`;
+          response += `  (Total entries: ${notepad.dataLog.length})\n`;
+        }
+        if (input.keyValues) {
+          response += `• Updated key values: ${Object.keys(input.keyValues).join(', ')}\n`;
+        }
+
+        this.agentLogger.info(LogEvent.TOOL_RESULT, `Updated notepad ${input.notepadId}`, { chatId });
+        return response;
+      },
+      {
+        name: 'updateNotepad',
+        description: `Update or create a notepad. Notepads persist data across runs.
+
+**What to store:**
+- keyValues: Quick reference data (e.g., lastPrice, threshold, currentStatus)
+- addDataEntry: Time-series data points with auto-timestamp (e.g., {price: 185, change: "+2%"})
+- notes/appendToNotes: Brief decisions, observations, reasoning
+
+**For scheduled tasks:** The notepad is auto-created with the job ID. Just use the job ID as notepadId.
+
+**Example:**
+updateNotepad({
+  notepadId: "job_123",
+  addDataEntry: { price: 45000, change: "+2.3%" },
+  keyValues: { lastPrice: 45000, trend: "bullish" }
+})`,
+        schema: z.object({
+          notepadId: z.string().describe('Unique notepad ID (for scheduled tasks, use the job ID)'),
+          category: z.string().optional().describe('Optional: category for organization'),
+          name: z.string().optional().describe('Optional: human-readable name'),
+          notes: z.string().optional().describe('Replace all notes'),
+          appendToNotes: z.string().optional().describe('Add to existing notes'),
+          addDataEntry: z.record(z.string(), z.any()).optional().describe('Add timestamped data entry'),
+          keyValues: z.record(z.string(), z.any()).optional().describe('Update key-value pairs (merged with existing)'),
+        }),
+      },
+    );
+  }
+
+  private createDeleteNotepadTool(chatId: string) {
+    return tool(
+      (input: { notepadId: string }) => {
+        this.agentLogger.info(LogEvent.TOOL_EXECUTING, `Delete notepad: ${input.notepadId}`, { chatId });
+
+        const deleted = this.notepadService.deleteNotepad(chatId, input.notepadId);
 
         if (deleted) {
-          this.agentLogger.info(LogEvent.TOOL_RESULT, `State deleted: ${input.key}`, { chatId });
-          return `✅ State "${input.key}" has been deleted.`;
+          this.agentLogger.info(LogEvent.TOOL_RESULT, `Deleted notepad ${input.notepadId}`, { chatId });
+          return `✅ Notepad "${input.notepadId}" has been deleted.`;
         }
 
-        this.agentLogger.info(LogEvent.TOOL_RESULT, `State not found for deletion: ${input.key}`, { chatId });
-        return `Key "${input.key}" was not found.`;
+        return `Notepad "${input.notepadId}" not found.`;
       },
       {
-        name: 'deleteState',
-        description: 'Delete a stored runtime value by key.',
+        name: 'deleteNotepad',
+        description: 'Delete a notepad and all its data. Use with caution - this cannot be undone.',
         schema: z.object({
-          key: z.string().describe('The key to delete'),
+          notepadId: z.string().describe('The notepad ID to delete'),
         }),
       },
     );
-  }
-
-  private createListStateTool(chatId: string) {
-    return tool(
-      () => {
-        this.agentLogger.info(LogEvent.TOOL_EXECUTING, 'List state keys', { chatId });
-
-        const entries = this.stateService.listState(chatId);
-
-        if (entries.length === 0) {
-          this.agentLogger.info(LogEvent.TOOL_RESULT, 'No state entries', { chatId });
-          return 'No stored state values.';
-        }
-
-        this.agentLogger.info(LogEvent.TOOL_RESULT, `Listed ${entries.length} state keys`, { chatId });
-
-        let response = `📋 **Stored State Keys (${entries.length}):**\n\n`;
-        for (const entry of entries) {
-          const age = this.formatAge(entry.updatedAt);
-          response += `• **${entry.key}** (updated ${age})`;
-          if (entry.expiresAt) {
-            const expiresIn = this.formatTimeUntil(entry.expiresAt);
-            response += ` - expires ${expiresIn}`;
-          }
-          response += '\n';
-        }
-
-        response += '\nUse getState(key) to retrieve a specific value.';
-
-        return response;
-      },
-      {
-        name: 'listState',
-        description: 'List all stored state keys with metadata (without values). ALWAYS call this first before getState if you need to find existing state data (e.g., previous prices, last check times). This ensures you use the correct key names.',
-      },
-    );
-  }
-
-  /**
-   * Format a timestamp as relative age (e.g., "5 min ago", "2 hours ago")
-   */
-  private formatAge(isoDate: string): string {
-    const ms = Date.now() - new Date(isoDate).getTime();
-    const minutes = Math.floor(ms / 60000);
-    if (minutes < 1) return 'just now';
-    if (minutes < 60) return `${minutes} min ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
-    const days = Math.floor(hours / 24);
-    return `${days} day${days > 1 ? 's' : ''} ago`;
-  }
-
-  /**
-   * Format time until expiration (e.g., "in 5 min", "in 2 hours")
-   */
-  private formatTimeUntil(isoDate: string): string {
-    const ms = new Date(isoDate).getTime() - Date.now();
-    if (ms < 0) return 'expired';
-    const minutes = Math.floor(ms / 60000);
-    if (minutes < 1) return 'in <1 min';
-    if (minutes < 60) return `in ${minutes} min`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `in ${hours} hour${hours > 1 ? 's' : ''}`;
-    const days = Math.floor(hours / 24);
-    return `in ${days} day${days > 1 ? 's' : ''}`;
   }
 }
