@@ -18,7 +18,7 @@ logs
 .git
 .gitignore
 *.md
-!data/prompts/*.yaml
+!prompts/*.yaml
 
 # IDE
 .vscode

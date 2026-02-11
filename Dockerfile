@@ -42,7 +42,7 @@ RUN npm ci --only=production
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/data/prompts ./data/prompts
+COPY --from=builder /app/prompts ./prompts
 
 # Create necessary directories
 RUN mkdir -p data logs
@@ -57,7 +57,7 @@ RUN chown -R nestjs:nodejs /app
 USER nestjs
 
 # Expose port (if needed for health checks or API later)
-EXPOSE 3000
+EXPOSE 29111
 
 # Start the application
 CMD ["node", "dist/main"]

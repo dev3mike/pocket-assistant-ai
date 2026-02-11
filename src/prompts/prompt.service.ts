@@ -22,7 +22,7 @@ export class PromptService implements OnModuleInit, OnModuleDestroy {
   private reloadDebounceTimer: NodeJS.Timeout | null = null;
 
   constructor() {
-    this.promptsDir = path.join(process.cwd(), 'data/prompts');
+    this.promptsDir = path.join(process.cwd(), 'prompts');
   }
 
   async onModuleInit() {
@@ -165,7 +165,7 @@ export class PromptService implements OnModuleInit, OnModuleDestroy {
   buildMainAgentPrompt(soulContext?: string): string {
     const base = this.getRawPrompt('main-agent', 'base');
     if (!base) {
-      throw new Error('Missing required prompt file: data/prompts/main-agent.yaml (base section)');
+      throw new Error('Missing required prompt file: prompts/main-agent.yaml (base section)');
     }
 
     const capabilities = this.getRawPrompt('main-agent', 'capabilities') || '';
@@ -201,7 +201,7 @@ export class PromptService implements OnModuleInit, OnModuleDestroy {
   buildTaskPlannerPrompt(): string {
     const prompt = this.getRawPrompt('browser-planner', 'system');
     if (!prompt) {
-      throw new Error('Missing required prompt file: data/prompts/browser-planner.yaml (system section)');
+      throw new Error('Missing required prompt file: prompts/browser-planner.yaml (system section)');
     }
     return prompt;
   }
@@ -213,7 +213,7 @@ export class PromptService implements OnModuleInit, OnModuleDestroy {
   buildCoderAgentPrompt(projectFolder: string): string {
     const template = this.getRawPrompt('coder-agent', 'system');
     if (!template) {
-      throw new Error('Missing required prompt file: data/prompts/coder-agent.yaml (system section)');
+      throw new Error('Missing required prompt file: prompts/coder-agent.yaml (system section)');
     }
     return template.replace(/\{\{projectFolder\}\}/g, projectFolder);
   }

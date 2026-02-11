@@ -207,13 +207,13 @@ The bot will create a recurring schedule with genius mode, use the browser agent
 └─────────────────────────────┬───────────────────────────────────┘
                               │
                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        Main Agent                               │
-│                    (LangGraph ReAct)                            │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────┐ │
-│  │  Tools   │  │  Memory  │  │   Soul   │  │ Scheduler│  │ Notepad  │  │State│ │
-│  └────┬─────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘  └────┘ │
-└───────┼─────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────┐
+│                        Main Agent                                             │
+│                    (LangGraph ReAct)                                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
+│  │  Tools   │  │  Memory  │  │   Soul   │  │ Scheduler│  │ Notepad  │         │
+│  └────┬─────┘  └──────────┘  └──────────┘  └──────────┘  └──────────┘         │
+└───────┼───────────────────────────────────────────────────────────────────────┘
         │
         ├─────────────────┬─────────────────┐
         ▼                 ▼                 ▼
@@ -233,7 +233,6 @@ The bot will create a recurring schedule with genius mode, use the browser agent
 | **Soul Service** | Stores user preferences and personality settings |
 | **Memory Service** | Two-layer memory: conversation history (with summarization) and long-term semantic memory; hybrid search enriches context |
 | **Notepad Service** | Persistent notepads per chat: notes, key-values, and time-series data logs so agents remember context and outcomes across runs (used by scheduler and tools) |
-| **State Service** | Per-chat key-value state with optional TTL for scheduled tasks and cross-session data |
 | **Scheduler** | Handles reminders and recurring tasks with cron support; optional genius model and per-job notepad for complex scheduled reasoning |
 
 ---
@@ -290,6 +289,8 @@ Edit `data/config.json` to add your Telegram user ID (created on first run if mi
 # Start the app (with hot reload)
 npm start
 ```
+
+The app listens on **port 29111** (used for the optional REST API channel when `ENABLE_API_CHANNEL=true`).
 
 ### Package scripts
 
@@ -430,14 +431,13 @@ pocket-assistant-ai/
 │   ├── prompts/         # Prompt templates (YAML)
 │   ├── scheduler/       # Task scheduling (cron, genius mode, schedule notepads)
 │   ├── soul/            # User personalization
-│   ├── state/           # Per-chat key-value state (TTL support)
 │   ├── telegram/        # Telegram integration
 │   ├── usage/           # Token usage tracking
 │   └── utils/           # Utilities and sanitization
 ├── data/
 │   ├── config.json      # Application config (created on first run)
 │   ├── prompts/         # YAML prompt files
-│   └── {userId}/        # Per-user: memory, longterm-memory, state, schedules, notepads/, soul, etc.
+│   └── {userId}/        # Per-user: memory, longterm-memory, schedules, notepads/, soul, etc.
 ├── docker-compose.yml   # Langfuse only (port 31111)
 └── Dockerfile           # Production container
 ```
@@ -480,10 +480,10 @@ private createMyNewTool(chatId: string) {
 
 ### Custom Prompts
 
-Prompts are stored in `data/prompts/*.yaml` and support hot-reload:
+Prompts are stored in `prompts/*.yaml` and support hot-reload:
 
 ```yaml
-# data/prompts/main-agent.yaml
+# prompts/main-agent.yaml
 base: |
   You are a helpful AI assistant...
 
