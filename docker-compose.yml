@@ -1,8 +1,11 @@
 version: '3.8'
 
-# Langfuse only. Run the app locally with: npm run start:dev
-# Start Langfuse: docker-compose up -d
-# Dashboard: http://localhost:31111
+# ChromaDB (vector memory) + Langfuse (observability)
+# Run the app locally with: npm run start:dev
+#
+# Start all:     docker compose up -d
+# Start ChromaDB: docker compose up chromadb -d          → http://localhost:8100
+# Start Langfuse: docker compose up langfuse-web -d     → http://localhost:31111
 
 services:
   langfuse-web:
@@ -48,8 +51,29 @@ services:
     networks:
       - langfuse-network
 
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chromadb
+    restart: unless-stopped
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - ANONYMIZED_TELEMETRY=FALSE
+    volumes:
+      - chromadb-data:/chroma/chroma
+    ports:
+      - "8100:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - langfuse-network
+
 volumes:
   langfuse-db-data:
+  chromadb-data:
 
 networks:
   langfuse-network:
