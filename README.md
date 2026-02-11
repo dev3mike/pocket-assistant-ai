@@ -231,7 +231,7 @@ The bot will create a recurring schedule with genius mode, use the browser agent
 | **Browser Agent** | Plans complex web tasks, executes them step-by-step with standalone Playwright or Browser MCP (`browsermcp.io`) |
 | **Coder Agent** | Manages code projects with file operations, git, and command execution |
 | **Soul Service** | Stores user preferences and personality settings |
-| **Memory Service** | Two-layer memory: conversation history (with summarization) and long-term semantic memory; hybrid search enriches context |
+| **Memory Service** | Two-layer memory: conversation history (with summarization) and long-term semantic memory via ChromaDB; vector search enriches context |
 | **Notepad Service** | Persistent notepads per chat: notes, key-values, and time-series data logs so agents remember context and outcomes across runs (used by scheduler and tools) |
 | **Scheduler** | Handles reminders and recurring tasks with cron support; optional genius model and per-job notepad for complex scheduled reasoning |
 
@@ -299,21 +299,57 @@ The app listens on **port 29111** (used for the optional REST API channel when `
 | `npm start` | Start the app with watch mode (hot reload) |
 | `npm run build` | Compile the NestJS app |
 | `npm run browser` | Run the browser helper script (opens Playwright browser) |
+| `npm run memories:list` | Print all long-term memories from ChromaDB (requires ChromaDB running) |
+| `npm run memories:reset` | Delete all long-term memories in ChromaDB. Optional: `npm run memories:reset -- --chat=CHAT_ID` to reset one chat only |
 
 ---
 
 ## Docker
 
-Docker is used only to run **Langfuse** (LLM observability). Run the app locally with `npm start`.
+Docker is used to run **ChromaDB** (vector memory) and **Langfuse** (LLM observability). Run the app locally with `npm start`.
+
+### ChromaDB (long-term memory)
+
+**ChromaDB** is the vector database used for long-term memory: it stores facts and preferences the assistant learns (e.g. “your wife’s name is Khatere”) and powers semantic search so the bot can recall relevant context. Each Telegram chat has its own collection; embeddings are generated via OpenRouter’s `text-embedding-3-small`.
+
+**Start ChromaDB:**
+
+```bash
+docker compose up chromadb -d
+# API: http://localhost:8100
+```
+
+In `.env`, set `CHROMA_HOST=http://localhost:8100` (this is the default). If ChromaDB is unavailable, long-term memory features (memorySave, memorySearch) are disabled.
+
+**Inspect or reset memories (CLI):**
+
+```bash
+# List all long-term memories (all chats)
+npm run memories:list
+
+# Reset all long-term memories
+npm run memories:reset
+
+# Reset long-term memory for one chat only
+npm run memories:reset -- --chat=132995226
+```
+
+These scripts require ChromaDB to be running. They connect to ChromaDB only and do not start the Nest app.
 
 ### Start Langfuse (optional)
 
 ```bash
-docker compose up -d
+docker compose up langfuse-web langfuse-db -d
 # Dashboard: http://localhost:31111
 ```
 
 Then in `.env` set `LANGFUSE_HOST=http://localhost:31111` and add your keys from the Langfuse project settings.
+
+### Start all services
+
+```bash
+docker compose up -d
+```
 
 ### Build app image (optional)
 
@@ -328,6 +364,7 @@ docker build -t pocket-assistant-ai .
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from BotFather |
 | `OPENROUTER_API_KEY` | Yes | API key from OpenRouter |
 | `GROQ_API_KEY` | No | Groq API key for voice transcription |
+| `CHROMA_HOST` | No | ChromaDB URL for vector memory (default: http://localhost:8100) |
 | `ZAPIER_MCP_TOKEN` | No | Zapier MCP integration token |
 | `LANGFUSE_PUBLIC_KEY` | No | Langfuse public key for observability |
 | `LANGFUSE_SECRET_KEY` | No | Langfuse secret key |
@@ -424,7 +461,7 @@ pocket-assistant-ai/
 │   ├── coder/           # Code assistant agent
 │   ├── config/          # Configuration management
 │   ├── logger/          # Logging and tracing
-│   ├── memory/          # Conversation + long-term memory, embeddings, semantic search
+│   ├── memory/          # Conversation + long-term memory (ChromaDB vector store)
 │   ├── messaging/       # Messaging abstraction layer
 │   ├── model/           # Model factory (main, vision, coder, genius)
 │   ├── notepad/         # Persistent notepads (notes, key-values, data logs) per chat
@@ -438,7 +475,7 @@ pocket-assistant-ai/
 │   ├── config.json      # Application config (created on first run)
 │   ├── prompts/         # YAML prompt files
 │   └── {userId}/        # Per-user: memory, longterm-memory, schedules, notepads/, soul, etc.
-├── docker-compose.yml   # Langfuse only (port 31111)
+├── docker-compose.yml   # ChromaDB (8100) + Langfuse (31111)
 └── Dockerfile           # Production container
 ```
 
