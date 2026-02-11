@@ -186,14 +186,14 @@ export class TelegramUpdate {
     this.agentLogger.info(LogEvent.MESSAGE_RECEIVED, 'User requested long-term memory reset', { chatId });
 
     const longTermService = this.memoryService.getLongTermMemoryService();
-    const stats = longTermService.getStats(chatId);
+    const stats = await longTermService.getStats(chatId);
 
     if (stats.total === 0) {
       await ctx.reply('📭 No long-term memories to clear.');
       return;
     }
 
-    longTermService.clearMemories(chatId);
+    await longTermService.clearMemories(chatId);
     await ctx.reply(`🧹 Cleared ${stats.total} long-term memories.\n\n_Your conversation history is preserved. Only stored facts/preferences were removed._`);
   }
 

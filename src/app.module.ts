@@ -18,6 +18,7 @@ import { ModelModule } from './model/model.module';
 import { PromptModule } from './prompts/prompt.module';
 import { TranscriptionModule } from './transcription/transcription.module';
 import { NotepadModule } from './notepad/notepad.module';
+import { ChromaModule } from './chroma/chroma.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { NotepadModule } from './notepad/notepad.module';
     ModelModule,
     PromptModule,
     NotepadModule, // Global notepad service for persistent data tracking
+    ChromaModule, // Global ChromaDB vector store for long-term memory
     AiModule,
     SoulModule,
     UsageModule,

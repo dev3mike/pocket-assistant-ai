@@ -261,7 +261,7 @@ export class FileToolsService {
         }
 
         // Create long-term memory entry
-        const memoryEntry = this.longTermMemory.addMemory(chatId, {
+        const memoryEntry = await this.longTermMemory.addMemory(chatId, {
           category: 'file',
           content: input.description,
           source: 'manual', // User explicitly asked to memorize
@@ -312,11 +312,21 @@ export class FileToolsService {
   private createSearchMemorizedFilesTool(chatId: string) {
     return tool(
       async (input: { query: string }) => {
-        // Search long-term memory
-        const memories = this.longTermMemory.searchByKeyword(chatId, input.query);
+        // Get all file memories from long-term memory
+        const allMemories = await this.longTermMemory.getMemories(chatId);
 
-        // Filter to only file memories
-        const fileMemories = memories.filter((m) => m.category === 'file' || m.metadata?.fileId);
+        // Filter to only file memories and search by keyword
+        const queryLower = input.query.toLowerCase();
+        const fileMemories = allMemories.filter((m) => {
+          if (m.category !== 'file' && !m.metadata?.fileId) {
+            return false;
+          }
+          // Check if query matches content or tags
+          const contentMatch = m.content.toLowerCase().includes(queryLower);
+          const tagMatch = m.tags?.some((t) => t.toLowerCase().includes(queryLower));
+          const fileNameMatch = m.metadata?.fileName?.toLowerCase().includes(queryLower);
+          return contentMatch || tagMatch || fileNameMatch;
+        });
 
         if (fileMemories.length === 0) {
           return `No memorized files found matching "${input.query}".`;

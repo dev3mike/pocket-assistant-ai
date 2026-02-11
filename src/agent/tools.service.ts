@@ -1332,7 +1332,7 @@ This searches both recent conversation history and long-term memories.`,
             : 'fact';
 
           const longTermService = this.memoryService.getLongTermMemoryService();
-          const entry = longTermService.addMemory(chatId, {
+          const entry = await longTermService.addMemory(chatId, {
             content: input.content,
             category,
             source: 'manual',

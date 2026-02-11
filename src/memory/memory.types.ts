@@ -1,7 +1,7 @@
 /**
  * Type definitions for the two-layer memory system.
- * Layer 1: Short-term conversation history (existing memory.json)
- * Layer 2: Long-term persistent facts/preferences (longterm-memory.json)
+ * Layer 1: Short-term conversation history (memory.json)
+ * Layer 2: Long-term persistent facts/preferences (ChromaDB)
  */
 
 /**
@@ -28,45 +28,15 @@ export interface LongTermMemoryEntry {
 }
 
 /**
- * Storage format for long-term memory file (longterm-memory.json)
- */
-export interface LongTermMemoryStore {
-  chatId: string;
-  entries: LongTermMemoryEntry[];
-  lastUpdated: string;
-}
-
-/**
- * Cached embedding entry for semantic search
- */
-export interface EmbeddingEntry {
-  id: string;
-  text: string;
-  textHash: string; // For cache invalidation
-  embedding: number[];
-  source: 'short-term' | 'long-term';
-  createdAt: string;
-}
-
-/**
- * Storage format for embeddings cache (embeddings.json)
- */
-export interface EmbeddingsStore {
-  chatId: string;
-  entries: EmbeddingEntry[];
-  lastUpdated: string;
-}
-
-/**
  * Result from memory search
  */
 export interface MemorySearchResult {
+  id?: string;
   content: string;
   score: number;
   source: 'short-term' | 'long-term';
   timestamp: string;
   category?: MemoryCategory;
-  id?: string;
 }
 
 /**

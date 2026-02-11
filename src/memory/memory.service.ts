@@ -4,14 +4,13 @@
  * saves the new assistant reply after. Used only by AgentService; no agent logic.
  *
  * Integrates with LongTermMemoryService for extracting important facts before
- * compaction or reset, and SemanticSearchService for context enrichment.
+ * compaction or reset, and for semantic search via ChromaDB.
  */
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import { AiService } from '../ai/ai.service';
 import { LongTermMemoryService } from './longterm-memory.service';
-import { SemanticSearchService } from './semantic-search.service';
 import { MemorySearchResult, MemorySearchOptions } from './memory.types';
 
 export interface FileAttachment {
@@ -49,8 +48,6 @@ export class MemoryService {
     private readonly aiService: AiService,
     @Inject(forwardRef(() => LongTermMemoryService))
     private readonly longTermMemoryService: LongTermMemoryService,
-    @Inject(forwardRef(() => SemanticSearchService))
-    private readonly semanticSearchService: SemanticSearchService,
   ) {
     this.dataDir = path.join(process.cwd(), 'data');
   }
@@ -185,24 +182,17 @@ export class MemoryService {
       return;
     }
 
-    this.logger.log(`Compacting memory for chat ${chatId}: summarizing ${messagesToSummarize.length} messages`);
+    this.logger.log(
+      `Compacting memory for chat ${chatId}: summarizing ${messagesToSummarize.length} messages`,
+    );
 
     try {
       // Extract important facts to long-term memory BEFORE summarizing
-      const extractedCount = await this.longTermMemoryService.extractAndSaveMemories(
+      await this.longTermMemoryService.extractAndSaveMemories(
         chatId,
         messagesToSummarize,
         'compaction',
       );
-
-      if (extractedCount > 0) {
-        // Re-index long-term memory after extraction
-        const longTermMemories = this.longTermMemoryService.getMemories(chatId);
-        await this.semanticSearchService.indexLongTermMemory(chatId, longTermMemories);
-      }
-
-      // Clear short-term embeddings since those messages are being summarized
-      this.semanticSearchService.removeShortTermEmbeddings(chatId);
 
       // Generate summary of old messages (pass chatId for usage tracking)
       const summary = await this.aiService.summarizeConversation(messagesToSummarize, chatId);
@@ -218,11 +208,15 @@ export class MemoryService {
           ...recentMessages,
         ];
 
-        this.logger.log(`Memory compacted for chat ${chatId}: ${messagesToSummarize.length} messages → 1 summary`);
+        this.logger.log(
+          `Memory compacted for chat ${chatId}: ${messagesToSummarize.length} messages → 1 summary`,
+        );
       } else {
         // If no important content, just keep recent messages
         memory.messages = recentMessages;
-        this.logger.log(`Memory trimmed for chat ${chatId}: removed ${messagesToSummarize.length} messages (nothing important)`);
+        this.logger.log(
+          `Memory trimmed for chat ${chatId}: removed ${messagesToSummarize.length} messages (nothing important)`,
+        );
       }
     } catch (error) {
       this.logger.error(`Failed to compact memory for chat ${chatId}: ${error}`);
@@ -249,18 +243,12 @@ export class MemoryService {
 
         if (extractedCount > 0) {
           this.logger.log(`Extracted ${extractedCount} facts to long-term memory before reset`);
-          // Re-index long-term memory
-          const longTermMemories = this.longTermMemoryService.getMemories(chatId);
-          await this.semanticSearchService.indexLongTermMemory(chatId, longTermMemories);
         }
       } catch (error) {
         this.logger.warn(`Failed to extract facts before reset: ${error}`);
         // Continue with reset even if extraction fails
       }
     }
-
-    // Clear short-term embeddings
-    this.semanticSearchService.removeShortTermEmbeddings(chatId);
 
     // Reset the memory
     const emptyMemory: ChatMemory = {
@@ -311,18 +299,10 @@ export class MemoryService {
     options?: MemorySearchOptions,
   ): Promise<MemorySearchResult[]> {
     try {
-      // Index current short-term messages if not already indexed
-      const messages = this.getMessages(chatId);
-      await this.semanticSearchService.indexShortTermMemory(chatId, messages);
-
-      // Search across all memory layers
-      const results = await this.semanticSearchService.search(chatId, query, {
+      return await this.longTermMemoryService.searchMemories(chatId, query, {
         maxResults: options?.maxResults ?? 3,
         minScore: options?.minScore ?? 0.4,
-        sources: options?.sources ?? ['long-term'], // Prefer long-term for enrichment
       });
-
-      return results;
     } catch (error) {
       this.logger.warn(`Failed to get enriched context: ${error}`);
       return [];
@@ -330,7 +310,7 @@ export class MemoryService {
   }
 
   /**
-   * Search memory (semantic + keyword) for relevant information.
+   * Search memory (semantic search via ChromaDB) for relevant information.
    * Used by the memorySearch tool.
    */
   async searchMemory(
@@ -338,7 +318,7 @@ export class MemoryService {
     query: string,
     options?: MemorySearchOptions,
   ): Promise<MemorySearchResult[]> {
-    return this.semanticSearchService.search(chatId, query, options);
+    return this.longTermMemoryService.searchMemories(chatId, query, options);
   }
 
   /**

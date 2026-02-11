@@ -2,48 +2,45 @@
  * LONG-TERM MEMORY SERVICE - Persistent facts, preferences, and decisions.
  * Layer 2 of the two-layer memory system.
  *
- * Stores important information extracted from conversations that should
- * persist beyond the short-term conversation window.
+ * Uses ChromaDB for vector storage and semantic search.
+ * If ChromaDB is unavailable, long-term memory features are disabled.
  */
 import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
-import * as fs from 'fs';
-import * as path from 'path';
 import * as crypto from 'crypto';
 import { ChatOpenAI } from '@langchain/openai';
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ModelFactoryService } from '../model/model-factory.service';
 import { UsageService } from '../usage/usage.service';
+import { ChromaService } from '../chroma/chroma.service';
 import {
   LongTermMemoryEntry,
-  LongTermMemoryStore,
   MemoryCategory,
+  MemorySource,
   ExtractedMemory,
+  MemorySearchResult,
 } from './memory.types';
 
 @Injectable()
 export class LongTermMemoryService {
   private readonly logger = new Logger(LongTermMemoryService.name);
-  private readonly dataDir: string;
   private model: ChatOpenAI;
-
-  // In-memory cache
-  private cache: Map<string, LongTermMemoryStore> = new Map();
 
   constructor(
     @Inject(forwardRef(() => ModelFactoryService))
     private readonly modelFactory: ModelFactoryService,
     @Inject(forwardRef(() => UsageService))
     private readonly usageService: UsageService,
+    @Inject(forwardRef(() => ChromaService))
+    private readonly chromaService: ChromaService,
   ) {
-    this.dataDir = path.join(process.cwd(), 'data');
     this.model = this.modelFactory.getModel('main');
   }
 
   /**
-   * Get the long-term memory file path for a chat
+   * Check if long-term memory is available (ChromaDB connected)
    */
-  private getMemoryPath(chatId: string): string {
-    return path.join(this.dataDir, chatId, 'longterm-memory.json');
+  isAvailable(): boolean {
+    return this.chromaService.isReady();
   }
 
   /**
@@ -54,98 +51,97 @@ export class LongTermMemoryService {
   }
 
   /**
-   * Load long-term memory for a chat
-   */
-  private loadMemory(chatId: string): LongTermMemoryStore {
-    if (this.cache.has(chatId)) {
-      return this.cache.get(chatId)!;
-    }
-
-    const memoryPath = this.getMemoryPath(chatId);
-
-    try {
-      if (fs.existsSync(memoryPath)) {
-        const content = fs.readFileSync(memoryPath, 'utf-8');
-        const store: LongTermMemoryStore = JSON.parse(content);
-        this.cache.set(chatId, store);
-        return store;
-      }
-    } catch (error) {
-      this.logger.error(`Failed to load long-term memory for ${chatId}: ${error}`);
-    }
-
-    // Return empty store if not found
-    const emptyStore: LongTermMemoryStore = {
-      chatId,
-      entries: [],
-      lastUpdated: new Date().toISOString(),
-    };
-    this.cache.set(chatId, emptyStore);
-    return emptyStore;
-  }
-
-  /**
-   * Save long-term memory to disk
-   */
-  private saveMemory(chatId: string, store: LongTermMemoryStore): void {
-    try {
-      const chatDir = path.join(this.dataDir, chatId);
-      if (!fs.existsSync(chatDir)) {
-        fs.mkdirSync(chatDir, { recursive: true });
-      }
-
-      const memoryPath = this.getMemoryPath(chatId);
-      store.lastUpdated = new Date().toISOString();
-      fs.writeFileSync(memoryPath, JSON.stringify(store, null, 2));
-
-      this.cache.set(chatId, store);
-    } catch (error) {
-      this.logger.error(`Failed to save long-term memory for ${chatId}: ${error}`);
-    }
-  }
-
-  /**
    * Get all long-term memories for a chat
    */
-  getMemories(chatId: string): LongTermMemoryEntry[] {
-    const store = this.loadMemory(chatId);
-    return store.entries;
+  async getMemories(chatId: string): Promise<LongTermMemoryEntry[]> {
+    if (!this.isAvailable()) {
+      return [];
+    }
+
+    const docs = await this.chromaService.getAllDocuments(chatId);
+    return docs.map((doc) => {
+      const extra = doc.metadata.extra;
+      let metadata: Record<string, any> = {};
+      if (typeof extra === 'string' && extra) {
+        try {
+          metadata = JSON.parse(extra);
+        } catch {
+          metadata = {};
+        }
+      } else if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+        metadata = extra as Record<string, any>;
+      }
+      return {
+        id: doc.id,
+        content: doc.content,
+        category: doc.metadata.category as MemoryCategory,
+        source: doc.metadata.source as MemorySource,
+        createdAt: doc.metadata.createdAt,
+        tags: doc.metadata.tags,
+        metadata,
+      };
+    });
   }
 
   /**
    * Get memories by category
    */
-  getMemoriesByCategory(chatId: string, category: MemoryCategory): LongTermMemoryEntry[] {
-    const store = this.loadMemory(chatId);
-    return store.entries.filter((e) => e.category === category);
+  async getMemoriesByCategory(
+    chatId: string,
+    category: MemoryCategory,
+  ): Promise<LongTermMemoryEntry[]> {
+    const memories = await this.getMemories(chatId);
+    return memories.filter((e) => e.category === category);
   }
 
   /**
    * Add a new memory entry
    */
-  addMemory(
+  async addMemory(
     chatId: string,
     entry: Omit<LongTermMemoryEntry, 'id' | 'createdAt'>,
-  ): LongTermMemoryEntry {
-    const store = this.loadMemory(chatId);
-
+  ): Promise<LongTermMemoryEntry> {
     const newEntry: LongTermMemoryEntry = {
       ...entry,
       id: this.generateId(),
       createdAt: new Date().toISOString(),
     };
 
-    // Check for duplicates (similar content)
-    const isDuplicate = store.entries.some(
-      (e) => this.isSimilarContent(e.content, newEntry.content),
-    );
+    if (!this.isAvailable()) {
+      this.logger.warn('ChromaDB not available, memory not saved');
+      return newEntry;
+    }
 
-    if (!isDuplicate) {
-      store.entries.push(newEntry);
-      this.saveMemory(chatId, store);
-      this.logger.log(`Added long-term memory for ${chatId}: ${newEntry.content.substring(0, 50)}...`);
-    } else {
-      this.logger.debug(`Skipped duplicate memory for ${chatId}`);
+    // Check for duplicates using semantic similarity
+    const similar = await this.chromaService.search(chatId, newEntry.content, {
+      maxResults: 1,
+    });
+
+    // Distance threshold: 0.1 means very similar (cosine distance)
+    if (similar.length > 0 && similar[0].distance < 0.1) {
+      this.logger.debug(`Skipped duplicate memory for ${chatId} (similar to ${similar[0].id})`);
+      return newEntry;
+    }
+
+    // Chroma only allows metadata values: string, number, boolean, null, or string[]/number[]/boolean[]
+    const success = await this.chromaService.addDocuments(chatId, [
+      {
+        id: newEntry.id,
+        content: newEntry.content,
+        metadata: {
+          category: newEntry.category,
+          source: newEntry.source,
+          createdAt: newEntry.createdAt,
+          tags: newEntry.tags || [],
+          extra: newEntry.metadata ? JSON.stringify(newEntry.metadata) : null,
+        },
+      },
+    ]);
+
+    if (success) {
+      this.logger.log(
+        `Added long-term memory for ${chatId}: ${newEntry.content.substring(0, 50)}...`,
+      );
     }
 
     return newEntry;
@@ -154,65 +150,101 @@ export class LongTermMemoryService {
   /**
    * Delete a memory entry by ID
    */
-  deleteMemory(chatId: string, memoryId: string): boolean {
-    const store = this.loadMemory(chatId);
-    const initialLength = store.entries.length;
-
-    store.entries = store.entries.filter((e) => e.id !== memoryId);
-
-    if (store.entries.length < initialLength) {
-      this.saveMemory(chatId, store);
-      this.logger.log(`Deleted long-term memory ${memoryId} for ${chatId}`);
-      return true;
+  async deleteMemory(chatId: string, memoryId: string): Promise<boolean> {
+    if (!this.isAvailable()) {
+      return false;
     }
 
-    return false;
+    const success = await this.chromaService.deleteDocument(chatId, memoryId);
+    if (success) {
+      this.logger.log(`Deleted long-term memory ${memoryId} for ${chatId}`);
+    }
+    return success;
   }
 
   /**
    * Update a memory entry
    */
-  updateMemory(
+  async updateMemory(
     chatId: string,
     memoryId: string,
     updates: Partial<Omit<LongTermMemoryEntry, 'id' | 'createdAt'>>,
-  ): LongTermMemoryEntry | null {
-    const store = this.loadMemory(chatId);
-    const entry = store.entries.find((e) => e.id === memoryId);
-
-    if (!entry) {
+  ): Promise<LongTermMemoryEntry | null> {
+    if (!this.isAvailable()) {
       return null;
     }
 
-    Object.assign(entry, updates);
-    this.saveMemory(chatId, store);
-    return entry;
+    const existing = await this.chromaService.getDocument(chatId, memoryId);
+    if (!existing) return null;
+
+    const existingExtra = existing.metadata.extra;
+    let existingExtraObj: Record<string, any> = {};
+    if (typeof existingExtra === 'string' && existingExtra) {
+      try {
+        existingExtraObj = JSON.parse(existingExtra);
+      } catch {
+        existingExtraObj = {};
+      }
+    } else if (existingExtra && typeof existingExtra === 'object' && !Array.isArray(existingExtra)) {
+      existingExtraObj = existingExtra as Record<string, any>;
+    }
+
+    const updatedContent = updates.content || existing.content;
+    const mergedExtra = { ...existingExtraObj, ...(updates.metadata ?? {}) };
+    const chromaMetadata = {
+      ...existing.metadata,
+      ...(updates.category && { category: updates.category }),
+      ...(updates.source && { source: updates.source }),
+      ...(updates.tags && { tags: updates.tags }),
+      extra: JSON.stringify(mergedExtra),
+    };
+
+    await this.chromaService.updateDocument(chatId, memoryId, updatedContent, chromaMetadata);
+
+    return {
+      id: memoryId,
+      content: updatedContent,
+      category: (chromaMetadata.category ?? existing.metadata.category) as MemoryCategory,
+      source: (chromaMetadata.source ?? existing.metadata.source) as MemorySource,
+      createdAt: existing.metadata.createdAt,
+      tags: chromaMetadata.tags ?? existing.metadata.tags,
+      metadata: mergedExtra,
+    };
   }
 
   /**
-   * Check if two content strings are similar (simple check)
+   * Search memories using semantic similarity via ChromaDB
    */
-  private isSimilarContent(a: string, b: string): boolean {
-    const normalize = (s: string) =>
-      s.toLowerCase().replace(/[^\w\s]/g, '').trim();
-    const normalizedA = normalize(a);
-    const normalizedB = normalize(b);
-
-    // Exact match
-    if (normalizedA === normalizedB) {
-      return true;
+  async searchMemories(
+    chatId: string,
+    query: string,
+    options: { maxResults?: number; minScore?: number; category?: MemoryCategory } = {},
+  ): Promise<MemorySearchResult[]> {
+    if (!this.isAvailable()) {
+      return [];
     }
 
-    // One contains the other (at least 80%)
-    if (normalizedA.includes(normalizedB) || normalizedB.includes(normalizedA)) {
-      const shorter = normalizedA.length < normalizedB.length ? normalizedA : normalizedB;
-      const longer = normalizedA.length < normalizedB.length ? normalizedB : normalizedA;
-      if (shorter.length / longer.length > 0.8) {
-        return true;
-      }
-    }
+    const { maxResults = 5, minScore = 0.3, category } = options;
 
-    return false;
+    const results = await this.chromaService.search(chatId, query, {
+      maxResults,
+      where: category ? { category } : undefined,
+    });
+
+    return results
+      .filter((r) => {
+        // Convert distance to similarity score (1 - distance for cosine)
+        const score = 1 - r.distance;
+        return score >= minScore;
+      })
+      .map((r) => ({
+        id: r.id,
+        content: r.content,
+        score: 1 - r.distance,
+        source: 'long-term' as const,
+        timestamp: r.metadata.createdAt,
+        category: r.metadata.category as MemoryCategory,
+      }));
   }
 
   /**
@@ -227,10 +259,10 @@ export class LongTermMemoryService {
     }
 
     try {
-      // Format conversation for LLM
       const conversationText = messages
         .map((m) => {
-          const roleLabel = m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : 'Context';
+          const roleLabel =
+            m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : 'Context';
           return `${roleLabel}: ${m.content}`;
         })
         .join('\n\n');
@@ -292,9 +324,9 @@ Return a JSON array of extracted memories (or [] if nothing explicitly stated - 
         this.usageService.recordUsageFromResponse(chatId, response);
       }
 
-      const content = typeof response.content === 'string' ? response.content : String(response.content);
+      const content =
+        typeof response.content === 'string' ? response.content : String(response.content);
 
-      // Parse JSON from response
       const jsonMatch = content.match(/\[[\s\S]*\]/);
       if (!jsonMatch) {
         return [];
@@ -302,7 +334,6 @@ Return a JSON array of extracted memories (or [] if nothing explicitly stated - 
 
       const extracted: ExtractedMemory[] = JSON.parse(jsonMatch[0]);
 
-      // Validate and filter
       return extracted.filter(
         (e) =>
           e.content &&
@@ -318,28 +349,28 @@ Return a JSON array of extracted memories (or [] if nothing explicitly stated - 
 
   /**
    * Extract and save important facts from a conversation
-   * Called during compaction or before reset
    */
   async extractAndSaveMemories(
     chatId: string,
     messages: Array<{ role: string; content: string }>,
     source: 'compaction' | 'auto' = 'compaction',
   ): Promise<number> {
+    if (!this.isAvailable()) {
+      this.logger.debug('ChromaDB not available, skipping memory extraction');
+      return 0;
+    }
+
     const extracted = await this.extractImportantFacts(chatId, messages);
 
     let savedCount = 0;
     for (const memory of extracted) {
-      const entry = this.addMemory(chatId, {
+      await this.addMemory(chatId, {
         content: memory.content,
         category: memory.category,
         source,
         tags: memory.tags,
       });
-
-      // Check if it was actually added (not duplicate)
-      if (entry) {
-        savedCount++;
-      }
+      savedCount++;
     }
 
     if (savedCount > 0) {
@@ -350,46 +381,35 @@ Return a JSON array of extracted memories (or [] if nothing explicitly stated - 
   }
 
   /**
-   * Clear all long-term memories for a chat (for testing or reset)
+   * Clear all long-term memories for a chat
    */
-  clearMemories(chatId: string): void {
-    const emptyStore: LongTermMemoryStore = {
-      chatId,
-      entries: [],
-      lastUpdated: new Date().toISOString(),
-    };
-    this.saveMemory(chatId, emptyStore);
+  async clearMemories(chatId: string): Promise<void> {
+    if (!this.isAvailable()) {
+      return;
+    }
+
+    await this.chromaService.clearCollection(chatId);
     this.logger.log(`Cleared long-term memory for ${chatId}`);
   }
 
   /**
    * Get memory statistics
    */
-  getStats(chatId: string): { total: number; byCategory: Record<string, number> } {
-    const store = this.loadMemory(chatId);
-    const byCategory: Record<string, number> = {};
+  async getStats(chatId: string): Promise<{ total: number; byCategory: Record<string, number> }> {
+    if (!this.isAvailable()) {
+      return { total: 0, byCategory: {} };
+    }
 
-    for (const entry of store.entries) {
+    const memories = await this.getMemories(chatId);
+
+    const byCategory: Record<string, number> = {};
+    for (const entry of memories) {
       byCategory[entry.category] = (byCategory[entry.category] || 0) + 1;
     }
 
     return {
-      total: store.entries.length,
+      total: memories.length,
       byCategory,
     };
-  }
-
-  /**
-   * Search memories by keyword
-   */
-  searchByKeyword(chatId: string, keyword: string): LongTermMemoryEntry[] {
-    const store = this.loadMemory(chatId);
-    const normalizedKeyword = keyword.toLowerCase();
-
-    return store.entries.filter((e) => {
-      const contentMatch = e.content.toLowerCase().includes(normalizedKeyword);
-      const tagMatch = e.tags?.some((t) => t.toLowerCase().includes(normalizedKeyword));
-      return contentMatch || tagMatch;
-    });
   }
 }
