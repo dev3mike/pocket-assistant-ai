@@ -1,0 +1,41 @@
+task_header: |
+  [SCHEDULED TASK: {{jobId}}]
+  Description: {{description}}
+  Run #{{runNumber}}{{maxExecutions}}
+  {{geniusMode}}---
+
+notepad_context_header: |
+  [NOTEPAD - Your persistent memory for this schedule]
+
+notepad_guidelines: |
+  [NOTEPAD GUIDELINES]
+  Use updateNotepad with notepadId="{{jobId}}" ONLY for data that matters across runs:
+  ✅ DO save: Key metrics (prices, counts), decisions made, thresholds, trends
+  ✅ DO use keyValues for: Current state, thresholds, last values for comparison
+  ✅ DO use addDataEntry for: Time-series data points (prices, metrics)
+  ✅ DO use notes for: Brief decision reasoning, pattern observations
+
+  ❌ DON'T save: Full responses, raw API data, redundant info, verbose explanations
+  ❌ DON'T: Add notes every run unless something meaningful changed
+
+educational_guidelines: |
+  **For EDUCATIONAL/LEARNING tasks (language lessons, daily facts, quizzes):**
+  1. FIRST read keyValues.topicsCovered to see what was already taught
+  2. Track MINIMAL curriculum progress in keyValues:
+     - lessonsCompleted: number (increment each run)
+     - topicsCovered: string[] → ONLY the words/terms, NOT meanings/translations!
+       ✅ Good: ["hinna", "orka", "lagom", "fika", "berätta"]
+       ❌ Bad: ["hinna (to have time)", "The Verb 'Orka'", "Daily Verbs IV"]
+     - lastTopic: string (brief identifier for continuity)
+  3. Log each lesson in addDataEntry with MINIMAL data:
+     ✅ Good: { topic: "verbs", items: ["berätta", "förstå", "lyssna"] }
+     ❌ Bad: { topic: "Daily Verbs X", content: "Three daily verbs...", phrases: ["Berätta mer!", ...] }
+  4. NEVER repeat words from topicsCovered - always teach something NEW
+  5. Keep entries scannable - just enough to prevent repetition
+
+  Keep it MINIMAL. Only store what's needed to avoid repeating content.
+
+response_requirement: |
+  [RESPONSE REQUIREMENT]
+  ⚠️ ALWAYS respond with a brief message after completing the task. Never end with just a tool call.
+  Even if only updating the notepad, provide a short summary (1-2 sentences) of what was done or observed.

@@ -12,6 +12,7 @@ import * as path from 'path';
 import { IMessagingService, MESSAGING_SERVICE } from '../messaging/messaging.interface';
 import { AgentService } from '../agent/agent.service';
 import { NotepadService } from '../notepad/notepad.service';
+import { PromptService } from '../prompts/prompt.service';
 
 export interface ScheduledJob {
   id: string;
@@ -62,6 +63,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     @Inject(forwardRef(() => AgentService))
     private readonly agentService: AgentService,
     private readonly notepadService: NotepadService,
+    private readonly promptService: PromptService,
   ) {
     this.dataDir = path.join(process.cwd(), 'data');
   }
@@ -403,7 +405,12 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
         job.useGeniusModel ? 'genius' : undefined,
       );
 
-      const result = await this.messagingService.sendMessage(job.chatId, text);
+      // Handle empty response - the agent may have only made tool calls without final text
+      const responseText = text && text.trim()
+        ? text
+        : `✅ Task completed: ${job.description}`;
+
+      const result = await this.messagingService.sendMessage(job.chatId, responseText);
 
       if (screenshots.length > 0) {
         await this.messagingService.sendPhotos(job.chatId, screenshots, '📸 Screenshot');
@@ -432,7 +439,7 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Build the task prompt for the agent
-   * Includes notepad context for tracking data across runs
+   * Uses PromptService for centralized prompt management
    */
   private buildTaskPrompt(job: ScheduledJob): string {
     // Get or create notepad for this schedule
@@ -441,70 +448,22 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
       name: job.description,
     });
 
-    let prompt = `[SCHEDULED TASK: ${job.id}]
-Description: ${job.description}
-Run #${job.executionCount + 1}${job.maxExecutions ? ` of ${job.maxExecutions}` : ''}
-${job.useGeniusModel ? '🧠 Enhanced reasoning mode enabled\n' : ''}
----
+    // Build notepad context if it has content
+    const hasNotepadContent = notepad.notes || notepad.dataLog.length > 0 || Object.keys(notepad.keyValues).length > 0;
 
-`;
-
-    // Include notepad context if it has content
-    if (notepad.notes || notepad.dataLog.length > 0 || Object.keys(notepad.keyValues).length > 0) {
-      prompt += `[NOTEPAD - Your persistent memory for this schedule]
-
-`;
-      if (Object.keys(notepad.keyValues).length > 0) {
-        prompt += `🔑 Key Values: ${JSON.stringify(notepad.keyValues)}\n\n`;
-      }
-
-      if (notepad.dataLog.length > 0) {
-        const recentEntries = notepad.dataLog.slice(-10);
-        prompt += `📊 Data Log (${notepad.dataLog.length} entries, last ${recentEntries.length}):\n`;
-        for (const entry of recentEntries) {
-          const time = new Date(entry.timestamp).toLocaleString();
-          prompt += `  [${time}] ${JSON.stringify(entry.entry)}\n`;
-        }
-        prompt += '\n';
-      }
-
-      if (notepad.notes) {
-        prompt += `📝 Notes:\n${notepad.notes}\n\n`;
-      }
-
-      prompt += '---\n\n';
-    }
-
-    prompt += `[TASK]
-${job.taskContext}
-
-[NOTEPAD GUIDELINES]
-Use updateNotepad with notepadId="${job.id}" ONLY for data that matters across runs:
-✅ DO save: Key metrics (prices, counts), decisions made, thresholds, trends
-✅ DO use keyValues for: Current state, thresholds, last values for comparison
-✅ DO use addDataEntry for: Time-series data points (prices, metrics)
-✅ DO use notes for: Brief decision reasoning, pattern observations
-
-❌ DON'T save: Full responses, raw API data, redundant info, verbose explanations
-❌ DON'T: Add notes every run unless something meaningful changed
-
-**For EDUCATIONAL/LEARNING tasks (language lessons, daily facts, quizzes):**
-1. FIRST read keyValues to see what was already taught (topicsCovered array)
-2. Track curriculum progress in keyValues:
-   - lessonsCompleted: number (increment each run)
-   - topicsCovered: string[] (topics/phrases already taught)
-   - lastTopic: string (for continuity)
-3. Log each lesson in addDataEntry: { topic, content, phrases }
-4. NEVER repeat content from topicsCovered - always teach something NEW
-5. Reference previous lessons to build continuity
-
-Keep it CONCISE. The notepad should be scannable, not a log of everything.
-
-[RESPONSE REQUIREMENT]
-⚠️ ALWAYS respond with a brief message after completing the task. Never end with just a tool call.
-Even if only updating the notepad, provide a short summary (1-2 sentences) of what was done or observed.`;
-
-    return prompt;
+    return this.promptService.buildSchedulerTaskPrompt({
+      jobId: job.id,
+      description: job.description,
+      runNumber: job.executionCount + 1,
+      maxExecutions: job.maxExecutions,
+      useGeniusModel: job.useGeniusModel,
+      taskContext: job.taskContext,
+      notepadContext: hasNotepadContent ? {
+        keyValues: notepad.keyValues,
+        dataLog: notepad.dataLog,
+        notes: notepad.notes,
+      } : undefined,
+    });
   }
 
   /**

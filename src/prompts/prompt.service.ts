@@ -235,4 +235,87 @@ export class PromptService implements OnModuleInit, OnModuleDestroy {
     await this.loadAllPrompts();
     this.logger.log('All prompts manually reloaded');
   }
+
+  /**
+   * Build the scheduler task prompt.
+   * Reads from scheduler.yaml - throws error if file is missing.
+   */
+  buildSchedulerTaskPrompt(params: {
+    jobId: string;
+    description: string;
+    runNumber: number;
+    maxExecutions?: number;
+    useGeniusModel?: boolean;
+    taskContext: string;
+    notepadContext?: {
+      keyValues?: Record<string, any>;
+      dataLog?: Array<{ timestamp: string; entry: any }>;
+      notes?: string;
+    };
+  }): string {
+    // Build header
+    const header = this.getPrompt('scheduler', 'task_header', {
+      jobId: params.jobId,
+      description: params.description,
+      runNumber: String(params.runNumber),
+      maxExecutions: params.maxExecutions ? ` of ${params.maxExecutions}` : '',
+      geniusMode: params.useGeniusModel ? '🧠 Enhanced reasoning mode enabled\n' : '',
+    });
+
+    if (!header) {
+      throw new Error('Missing required prompt file: prompts/scheduler.yaml (task_header section)');
+    }
+
+    let prompt = header + '\n\n';
+
+    // Add notepad context if present
+    if (params.notepadContext) {
+      const { keyValues, dataLog, notes } = params.notepadContext;
+      const hasContent = notes || (dataLog && dataLog.length > 0) || (keyValues && Object.keys(keyValues).length > 0);
+
+      if (hasContent) {
+        const contextHeader = this.getRawPrompt('scheduler', 'notepad_context_header') || '';
+        prompt += contextHeader + '\n';
+
+        if (keyValues && Object.keys(keyValues).length > 0) {
+          prompt += `🔑 Key Values: ${JSON.stringify(keyValues)}\n\n`;
+        }
+
+        if (dataLog && dataLog.length > 0) {
+          const recentEntries = dataLog.slice(-10);
+          prompt += `📊 Data Log (${dataLog.length} entries, last ${recentEntries.length}):\n`;
+          for (const entry of recentEntries) {
+            const time = new Date(entry.timestamp).toLocaleString();
+            prompt += `  [${time}] ${JSON.stringify(entry.entry)}\n`;
+          }
+          prompt += '\n';
+        }
+
+        if (notes) {
+          prompt += `📝 Notes:\n${notes}\n\n`;
+        }
+
+        prompt += '---\n\n';
+      }
+    }
+
+    // Add task context
+    prompt += `[TASK]\n${params.taskContext}\n\n`;
+
+    // Add notepad guidelines
+    const guidelines = this.getPrompt('scheduler', 'notepad_guidelines', {
+      jobId: params.jobId,
+    });
+    prompt += guidelines + '\n';
+
+    // Add educational guidelines
+    const educationalGuidelines = this.getRawPrompt('scheduler', 'educational_guidelines') || '';
+    prompt += educationalGuidelines + '\n';
+
+    // Add response requirement
+    const responseRequirement = this.getRawPrompt('scheduler', 'response_requirement') || '';
+    prompt += responseRequirement;
+
+    return prompt;
+  }
 }
