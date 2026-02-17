@@ -1427,34 +1427,33 @@ Notepads persist data across runs - use for tracking metrics, decisions, or any 
           return `Notepad "${input.notepadId}" exists but is empty. Use updateNotepad to add notes, data entries, or key values.`;
         }
 
-        let response = `📓 **Notepad: ${input.notepadId}**`;
+        let response = `Notepad: ${input.notepadId}`;
         if (notepad.category) response += ` [${notepad.category}]`;
         if (notepad.name) response += ` - ${notepad.name}`;
-        response += '\n\n';
+        response += '\n';
 
         if (notepad.notes) {
-          response += `**Notes:**\n${notepad.notes}\n\n`;
+          response += `Notes: ${notepad.notes}\n`;
         }
 
         if (Object.keys(notepad.keyValues).length > 0) {
-          response += `**Key Values:**\n${JSON.stringify(notepad.keyValues, null, 2)}\n\n`;
+          response += `Key Values: ${JSON.stringify(notepad.keyValues)}\n`;
         }
 
         if (notepad.dataLog.length > 0) {
-          response += `**Data Log** (${notepad.dataLog.length} entries):\n`;
-          // Show recent entries (last 20)
+          response += `Data Log (${notepad.dataLog.length} entries):\n`;
           const recentEntries = notepad.dataLog.slice(-20);
           for (const entry of recentEntries) {
             const time = new Date(entry.timestamp).toLocaleString();
             response += `[${time}] ${JSON.stringify(entry.entry)}\n`;
           }
           if (notepad.dataLog.length > 20) {
-            response += `... and ${notepad.dataLog.length - 20} more entries\n`;
+            response += `...${notepad.dataLog.length - 20} more entries\n`;
           }
         }
 
-        response += `\nCreated: ${new Date(notepad.createdAt).toLocaleString()}`;
-        response += `\nLast updated: ${new Date(notepad.lastUpdated).toLocaleString()}`;
+        response += `Created: ${new Date(notepad.createdAt).toLocaleString()}\n`;
+        response += `Updated: ${new Date(notepad.lastUpdated).toLocaleString()}`;
 
         this.agentLogger.info(LogEvent.TOOL_RESULT, `Read notepad ${input.notepadId}`, { chatId });
         return response;

@@ -278,21 +278,20 @@ export class PromptService implements OnModuleInit, OnModuleDestroy {
         prompt += contextHeader + '\n';
 
         if (keyValues && Object.keys(keyValues).length > 0) {
-          prompt += `🔑 Key Values: ${JSON.stringify(keyValues)}\n\n`;
+          prompt += `Key Values: ${JSON.stringify(keyValues)}\n`;
         }
 
         if (dataLog && dataLog.length > 0) {
           const recentEntries = dataLog.slice(-10);
-          prompt += `📊 Data Log (${dataLog.length} entries, last ${recentEntries.length}):\n`;
+          prompt += `Data Log (${dataLog.length} entries, last ${recentEntries.length}):\n`;
           for (const entry of recentEntries) {
             const time = new Date(entry.timestamp).toLocaleString();
-            prompt += `  [${time}] ${JSON.stringify(entry.entry)}\n`;
+            prompt += `[${time}] ${JSON.stringify(entry.entry)}\n`;
           }
-          prompt += '\n';
         }
 
         if (notes) {
-          prompt += `📝 Notes:\n${notes}\n\n`;
+          prompt += `Notes: ${notes}\n`;
         }
 
         prompt += '---\n\n';
